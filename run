@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /mnt/media/archive/dev/apps/mistral-asr
+source .venv/bin/activate
+
+export HF_HOME=/mnt/card/cache
+export TRANSFORMERS_CACHE=/mnt/card/cache/transformers
+export HUGGINGFACE_HUB_CACHE=/mnt/card/cache/hub
+export TMPDIR=/mnt/card/tmp
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: run <input[.mkv|.mp4|.avi]>"
+  exit 1
+fi
+
+input="$1"
+if [[ ! -e "$input" ]]; then
+  if   [[ -e "${input}.mkv" ]]; then input="${input}.mkv"
+  elif [[ -e "${input}.mp4" ]]; then input="${input}.mp4"
+  elif [[ -e "${input}.avi" ]]; then input="${input}.avi"
+  else
+    echo "Error: file not found: '$1' (tried .mkv, .mp4, .avi)"
+    exit 1
+  fi
+fi
+
+mkdir -p /mnt/card/tmp
+logfile="/mnt/card/tmp/$(basename "$input").log"
+
+echo ">> Running in background; log: $logfile"
+nohup env PYTHONUNBUFFERED=1 stdbuf -oL -eL python -u voxtral_subs.py "$input" >"$logfile" 2>&1 & disown
