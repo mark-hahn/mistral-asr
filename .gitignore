@@ -1,2 +1,5 @@
 .venv/
 test/
+old-test/
+secrets/
+node_modules/
