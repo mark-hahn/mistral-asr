@@ -1,32 +1,84 @@
-#!/usr/bin/env bash
+#!/bin/bash
+
+# Simple Voxtral Background Wrapper
+# Usage: ./run [voxtral-options] <input-path>
+# run --audio-quality=high --chunk-sec=90 test
+
 set -euo pipefail
 
-cd /mnt/media/archive/dev/apps/mistral-asr
-source .venv/bin/activate
+# Find the voxtral script in the same directory as this wrapper
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VOXTRAL_SCRIPT="${SCRIPT_DIR}/voxtral-claude.js"
 
-export HF_HOME=/mnt/card/cache
-export TRANSFORMERS_CACHE=/mnt/card/cache/transformers
-export HUGGINGFACE_HUB_CACHE=/mnt/card/cache/hub
-export TMPDIR=/mnt/card/tmp
-
-if [[ $# -lt 1 ]]; then
-  echo "Usage: run <input[.mkv|.mp4|.avi]>"
-  exit 1
+# Check if voxtral script exists
+if [[ ! -f "$VOXTRAL_SCRIPT" ]]; then
+    if [[ -f "./voxtral-claude.js" ]]; then
+        VOXTRAL_SCRIPT="./voxtral-claude.js"
+    else
+        echo "ERROR: voxtral-claude.js not found" >&2
+        exit 1
+    fi
 fi
 
-input="$1"
-if [[ ! -e "$input" ]]; then
-  if   [[ -e "${input}.mkv" ]]; then input="${input}.mkv"
-  elif [[ -e "${input}.mp4" ]]; then input="${input}.mp4"
-  elif [[ -e "${input}.avi" ]]; then input="${input}.avi"
-  else
-    echo "Error: file not found: '$1' (tried .mkv, .mp4, .avi)"
+# Check if input was provided
+if [[ $# -eq 0 ]]; then
+    echo "ERROR: No input path provided" >&2
+    echo "Usage: $0 [--audio-quality=high] [--chunk-sec=90] [--silence-aware] <input-path>" >&2
     exit 1
-  fi
 fi
 
-mkdir -p /mnt/card/tmp
-logfile="/mnt/card/tmp/$(basename "$input").log"
+# Get the input path (last argument)
+INPUT_PATH="${!#}"
 
-echo ">> Running in background; log: $logfile"
-nohup env PYTHONUNBUFFERED=1 stdbuf -oL -eL python -u voxtral_subs.py "$input" >"$logfile" 2>&1 & disown
+# Resolve the input path
+if [[ ! -e "$INPUT_PATH" ]]; then
+    echo "ERROR: Input path does not exist: $INPUT_PATH" >&2
+    exit 1
+fi
+
+# Determine log directory based on input type
+if [[ -f "$INPUT_PATH" ]]; then
+    # Single file - log goes to same directory as file
+    LOG_DIR="$(dirname "$(realpath "$INPUT_PATH")")"
+elif [[ -d "$INPUT_PATH" ]]; then
+    # Directory - log goes to that directory
+    LOG_DIR="$(realpath "$INPUT_PATH")"
+else
+    echo "ERROR: Input path is neither file nor directory: $INPUT_PATH" >&2
+    exit 1
+fi
+
+LOG_FILE="${LOG_DIR}/voxtral-srt.log"
+
+echo "Starting Voxtral transcription in background..."
+echo "Input: $INPUT_PATH"
+echo "Log: $LOG_FILE"
+echo ""
+
+# Log session start immediately
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Voxtral Background Session Started ==="
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Command: node $VOXTRAL_SCRIPT $*"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Working directory: $(pwd)"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ==="
+} >> "$LOG_FILE"
+
+# Simple approach: run directly in background with exec
+{
+    if node "$VOXTRAL_SCRIPT" "$@"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Voxtral Session Completed Successfully ==="
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Voxtral Session Failed ==="
+    fi
+} >> "$LOG_FILE" 2>&1 &
+
+# Disown the background process so it survives terminal closure
+disown
+
+echo "Background transcription started!"
+echo ""
+echo "To monitor progress:"
+echo "  tail -f $LOG_FILE"
+echo ""
+echo "To check if still running:"
+echo "  ps aux | grep voxtral-claude"

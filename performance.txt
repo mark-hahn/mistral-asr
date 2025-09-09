@@ -1,0 +1,47 @@
+  
+  original:
+    28 mins -- test/ideal.s05e06.dvdrip.xvid-haggis.avi
+❌  00:00:04 -> I've drawn all me savings out (-of the bank)
+❌  00:00:33 -> I should have set this (-when I first bought it).
+    00:01:10 -> That hit the spot.
+    00:01:48 -> Thanks.
+    00:01:54 -> Oh, my God!
+    00:02:16 -> Cartoon Head's Triad have got a red bag.
+    00:02:36 -> No.  -- line 35
+  
+ ?  00:07:54 -> Am I heckers gonna see him again!
+    00:08:01 -> As far as I'm concerned, he's just another ex.
+    00:08:01 -> The panther don't hang around an old kill
+ ❌ 00:08:01 -> he (-just) slinks on through the jungle.
+ 
+  high ...
+    node voxtral-claude.js --audio-quality=high --chunk-sec=90 --silence-aware test
+    10 mins  $0.04  ended: $0.68
+ ✅  I've drawn all my savings out of the bank.
+ ❌  I should have said this when I first bought it.
+ ❌  I hit the spot.
+ ✅  Thanks.
+ ✅  Oh, my God!
+ ❌  Can't you Ned's try? I'd have got a red back. 
+ ✅  No. -- line 50
+
+ ❌  And my heck is going to see him again.
+ ✅  As far as I'm concerned, he's just another ex.
+ ❌  The panther don't hang around and all kill
+ ✅  He just slinks on through the jungle.
+ 
+  Balanced ...
+    node voxtral-claude.js --audio-quality=medium --chunk-sec=120 test
+    8 mins   $0.08  ended: $0.76
+ ✅  I've drawn all my savings out of the bank.
+ ❌ I should have said this when I first bought it.
+ ❌ I ate the spot.
+ ❌ (-Thanks.)
+ ❌ (-Oh, my God!)
+ ❌ I can't do Ned's try. I'd have got a red back.
+ ❌ (-No.)  -- line 50
+
+ ✅  Am I heck who's going to see him again?
+ ❌ As far as I'm concerned, he's just another egg.
+ ❌ The panther don't hang around and all kill.
+ ✅  He just slinks on through the jungle

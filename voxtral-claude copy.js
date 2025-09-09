@@ -35,6 +35,9 @@ const __dirname = path.dirname(__filename);
 /* ---------------- CLI argument parsing ---------------- */
 const rawArgs = process.argv.slice(2);
 
+console.error("=== CORRECTED TIMESTAMP SCRIPT ===");
+console.error("Raw arguments:", rawArgs);
+
 const flagsKVP = new Map(
   rawArgs.filter(a => a.startsWith("--") && a.includes("="))
     .map(a => {const [k, v] = a.split("=", 2); return [k, v];})
@@ -50,7 +53,7 @@ function getNum(name, dflt) {
   return dflt;
 }
 
-// Configuration - clean and minimal
+// CORRECTED Configuration - simplified for debugging
 const CHUNK_SEC = getNum("--chunk-sec", 90);
 const SILENCE_AWARE = switches.has("--silence-aware");
 const AUDIO_QUALITY = flagsKVP.get("--audio-quality") || "medium";
@@ -65,6 +68,11 @@ const AUDIO_CONFIGS = {
   max: {rate: 48000, bitrate: "256k"}
 };
 const audioConfig = AUDIO_CONFIGS[AUDIO_QUALITY];
+
+console.error("CORRECTED Configuration:");
+console.error(`  CHUNK_SEC: ${CHUNK_SEC}`);
+console.error(`  SILENCE_AWARE: ${SILENCE_AWARE}`);
+console.error(`  AUDIO_QUALITY: ${AUDIO_QUALITY} (${audioConfig.rate}Hz)`);
 
 /* ---------------- Input validation ---------------- */
 if (positional.length === 0) {
@@ -81,7 +89,7 @@ let API_KEY;
 
 try {
   API_KEY = fs.readFileSync(KEY_PATH, "utf8").trim();
-  // Silent API key loading
+  console.log(`✓ API key loaded`);
 } catch (e) {
   console.error(`❌ Unable to read API key from ${KEY_PATH}: ${e.message}`);
   process.exit(1);
@@ -96,13 +104,66 @@ const FILE_LIMIT = 19 * 1024 * 1024;
 function ts() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}`;
 }
 
 function setupLogger(logPath) {
-  // Don't redirect console - let wrapper handle logging
-  // Just return a no-op cleanup function
-  return () => { };
+  let logStream;
+
+  try {
+    logStream = fs.createWriteStream(logPath, {flags: "a"});
+    logStream.write(`[${ts()}] === Voxtral CORRECTED logging started ===\n`);
+    console.log(`📝 Logging to: ${logPath}`);
+  } catch (e) {
+    console.error(`⚠️  Warning: Could not setup log file ${logPath}: ${e.message}`);
+    return () => { }; // Return no-op cleanup function
+  }
+
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalWarn = console.warn;
+
+  const mirror = (level, args) => {
+    const line = `[${ts()}] ${util.format(...args)}`;
+
+    // Always write to console
+    if (level === "error") {
+      process.stderr.write(line + "\n");
+    } else {
+      process.stdout.write(line + "\n");
+    }
+
+    // Write to log file if available
+    if (logStream && logStream.writable) {
+      try {
+        logStream.write(line + "\n");
+      } catch (e) {
+        console.log = originalLog;
+        console.error = originalError;
+        console.warn = originalWarn;
+        console.warn(`⚠️  Log file write failed: ${e.message}`);
+      }
+    }
+  };
+
+  console.log = (...a) => mirror("log", a);
+  console.error = (...a) => mirror("error", a);
+  console.warn = (...a) => mirror("warn", a);
+
+  return () => {
+    try {
+      if (logStream && logStream.writable) {
+        logStream.write(`[${ts()}] === Voxtral CORRECTED logging ended ===\n`);
+        logStream.end();
+      }
+      console.log = originalLog;
+      console.error = originalError;
+      console.warn = originalWarn;
+    } catch (e) {
+      // Ignore cleanup errors
+    }
+  };
 }
 
 /* ---------------- Utility functions ---------------- */
@@ -118,7 +179,7 @@ async function pathExists(p) {
 function getEnhancedSrtPath(videoPath) {
   const dir = path.dirname(videoPath);
   const baseName = path.basename(videoPath, path.extname(videoPath));
-  return path.join(dir, `${baseName}.enx.srt`);
+  return path.join(dir, `${baseName}.enh.srt`);
 }
 
 function isVideoFile(p) {
@@ -136,7 +197,7 @@ function toSrtTime(totalSec) {
 
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    // Silent execution - no "Running:" logs
+    console.log(`Running: ${cmd} ${args.join(" ")}`);
     const p = spawn(cmd, args, {stdio: ["ignore", "pipe", "pipe"], ...opts});
     let out = "", err = "";
     p.stdout.on("data", d => out += d.toString());
@@ -170,7 +231,7 @@ async function getDurationSec(file) {
 
 /* ---------------- Audio processing ---------------- */
 async function extractAudioHighQuality(inputVideo, outWav) {
-  // Silent audio extraction
+  console.log(`Extracting audio at high quality...`);
   await run("ffmpeg", [
     "-y", "-i", inputVideo,
     "-ac", "1",
@@ -182,7 +243,8 @@ async function extractAudioHighQuality(inputVideo, outWav) {
 }
 
 async function preprocessAudio(inputWav, outputWav) {
-  // Silent audio preprocessing
+  console.log(`Preprocessing audio (quality: ${AUDIO_QUALITY})...`);
+
   const filters = [];
 
   if (ENABLE_NOISE_REDUCTION) {
@@ -213,10 +275,12 @@ async function preprocessAudio(inputWav, outputWav) {
   ]);
 }
 
-/* ---------------- Simple, precise chunking with boundary fix ---------------- */
+/* ---------------- CORRECTED: Simple, precise chunking with boundary fix ---------------- */
 async function createPreciseChunks(inWav, outDir, chunkSec) {
-  // Silent chunking
+  console.log(`Creating precise chunks (${chunkSec}s each, NO OVERLAP)...`);
+
   const totalDuration = await getDurationSec(inWav);
+  console.log(`Total audio duration: ${totalDuration.toFixed(1)}s`);
 
   const chunks = [];
   let chunkStart = 0;
@@ -227,12 +291,17 @@ async function createPreciseChunks(inWav, outDir, chunkSec) {
     const chunkDuration = chunkEnd - chunkStart;
 
     // Skip very short final chunks
-    if (chunkDuration < 5) break;
+    if (chunkDuration < 5) {
+      console.log(`Skipping final chunk of ${chunkDuration.toFixed(1)}s (too short)`);
+      break;
+    }
 
     const outputPath = path.join(outDir, `chunk-${String(chunkIndex).padStart(3, "0")}.wav`);
 
     // FIXED: Check if we're at the end and adjust extraction accordingly
     if (chunkEnd >= totalDuration) {
+      // For the final chunk, extract from start to the very end
+      console.log(`Final chunk: extracting from ${chunkStart.toFixed(1)}s to end (${totalDuration.toFixed(1)}s)`);
       await run("ffmpeg", [
         "-y", "-i", inWav,
         "-ss", String(chunkStart.toFixed(3)),
@@ -242,6 +311,7 @@ async function createPreciseChunks(inWav, outDir, chunkSec) {
         outputPath
       ]);
     } else {
+      // Normal chunk extraction with duration
       await run("ffmpeg", [
         "-y", "-i", inWav,
         "-ss", String(chunkStart.toFixed(3)),
@@ -260,10 +330,13 @@ async function createPreciseChunks(inWav, outDir, chunkSec) {
       duration: chunkDuration
     });
 
+    console.log(`Chunk ${chunkIndex}: source ${chunkStart.toFixed(1)}s → ${chunkEnd.toFixed(1)}s (duration: ${chunkDuration.toFixed(1)}s)`);
+
     chunkStart = chunkEnd;
     chunkIndex++;
   }
 
+  console.log(`Created ${chunks.length} chunks total`);
   return chunks;
 }
 
@@ -278,7 +351,7 @@ async function prepareLosslessUpload(partWavPath, tmpDir) {
   ]);
 
   const stat = await fsp.stat(flacPath);
-  // No logging here - size info not needed per chunk
+  console.log(`    FLAC size: ${(stat.size / 1024 / 1024).toFixed(2)} MB`);
 
   if (stat.size > FILE_LIMIT) {
     throw new Error(`FLAC file too large: ${stat.size} bytes > ${FILE_LIMIT} bytes`);
@@ -321,24 +394,24 @@ async function transcribeViaAxios(uploadPath, mime) {
 }
 
 async function transcribeOneUpload(uploadInfo) {
-  // No "Transcribing..." message - handled in main chunk log
+  console.log(`  Transcribing ${uploadInfo.filename}...`);
 
   try {
     const resp = await transcribeViaAxios(uploadInfo.path, uploadInfo.mime);
     const segmentCount = Array.isArray(resp?.segments) ? resp.segments.length : 0;
-    // No "Found X segments" message - handled in main chunk log
+    console.log(`  Found ${segmentCount} segments`);
     return resp;
   } catch (err) {
-    // Still throw error but don't log here - main function will log
+    console.error(`  Transcription failed: ${err.message}`);
     throw err;
   }
 }
 
-/* ---------------- Timestamp processing without double-counting ---------------- */
+/* ---------------- CORRECTED: Timestamp processing without double-counting ---------------- */
 function processSegments(segments, chunkInfo) {
   if (!segments || segments.length === 0) return [];
 
-  // No "Processing X segments" message
+  console.log(`  Processing ${segments.length} segments for chunk ${chunkInfo.index}`);
 
   const processedSegments = [];
 
@@ -347,7 +420,7 @@ function processSegments(segments, chunkInfo) {
 
     // Validate segment
     if (seg.start === undefined || seg.end === undefined || !seg.text?.trim()) {
-      // No warning per segment - would clutter log
+      console.warn(`    Skipping invalid segment ${i}`);
       continue;
     }
 
@@ -358,11 +431,14 @@ function processSegments(segments, chunkInfo) {
 
     // Validate final timestamps
     if (globalEnd <= globalStart) {
-      // No warning per segment - would clutter log
+      console.warn(`    Skipping segment ${i} with invalid duration: ${globalStart.toFixed(1)}s → ${globalEnd.toFixed(1)}s`);
       continue;
     }
 
-    // No debug output per segment
+    // Debug output for first few segments
+    if (i < 2) {
+      console.log(`    Segment ${i}: chunk_time=${seg.start.toFixed(1)}s → global_time=${globalStart.toFixed(1)}s (offset: +${chunkInfo.startTimeInSource.toFixed(1)}s)`);
+    }
 
     processedSegments.push({
       start: globalStart,
@@ -374,7 +450,7 @@ function processSegments(segments, chunkInfo) {
     });
   }
 
-  // No "Processed X/Y segments" message
+  console.log(`  Processed ${processedSegments.length}/${segments.length} valid segments`);
   return processedSegments;
 }
 
@@ -403,7 +479,7 @@ function generateSRT(segments, outputPath) {
   }
 
   fs.writeFileSync(outputPath, srtContent, "utf8");
-  console.log(`[${ts()}] ✓ ${path.basename(outputPath)} written (${index - 1} captions)`);
+  console.log(`✓ Enhanced SRT written: ${outputPath} (${index - 1} captions)`);
 }
 
 /* ---------------- Main processing function ---------------- */
@@ -412,11 +488,11 @@ async function processOneVideo(videoPath) {
   const srtPath = getEnhancedSrtPath(videoPath);
 
   if (await pathExists(srtPath)) {
-    console.log(`[${ts()}] ✓ ${videoName}: Enhanced SRT already exists, skipping.`);
+    console.log(`✓ ${videoName}: Enhanced SRT already exists, skipping.`);
     return;
   }
 
-  console.log(`[${ts()}] 🎬 Processing: ${path.basename(videoPath)}`);
+  console.log(`\n🎬 Processing: ${videoName}`);
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "voxtral-"));
   const rawWavFile = path.join(tmpDir, "audio_raw.wav");
@@ -434,6 +510,7 @@ async function processOneVideo(videoPath) {
     }
 
     const totalDur = await getDurationSec(finalWavFile);
+    console.log(`Duration: ${totalDur.toFixed(1)}s`);
 
     // Create precise chunks
     const chunkDir = path.join(tmpDir, "chunks");
@@ -441,32 +518,31 @@ async function processOneVideo(videoPath) {
 
     const chunks = await createPreciseChunks(finalWavFile, chunkDir, CHUNK_SEC);
 
-    console.log(`[${ts()}] Duration: ${totalDur.toFixed(0)}s, ${chunks.length} chunks`);
-
     // Process each chunk
     const allSegments = [];
 
     for (const chunkInfo of chunks) {
+      console.log(`Processing chunk ${chunkInfo.index + 1}/${chunks.length}: ${chunkInfo.startTimeInSource.toFixed(1)}s → ${chunkInfo.endTimeInSource.toFixed(1)}s`);
+
       try {
-        // Prepare upload (silent)
+        // Prepare upload
         const uploadInfo = await prepareLosslessUpload(chunkInfo.path, tmpDir);
 
-        // Transcribe (silent)
+        // Transcribe
         const response = await transcribeOneUpload(uploadInfo);
 
         if (response.segments && response.segments.length > 0) {
-          // Process segments (silent)
+          // CORRECTED: Process segments with simple offset addition
           const processedSegments = processSegments(response.segments, chunkInfo);
           allSegments.push(...processedSegments);
 
-          // Single line per chunk with just input file name
-          console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.index + 1}/${chunks.length}: ${chunkInfo.startTimeInSource.toFixed(0)}s-${chunkInfo.endTimeInSource.toFixed(0)}s ✓ ${processedSegments.length} segments`);
+          console.log(`  ✓ Added ${processedSegments.length} segments to timeline`);
         } else {
-          console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.index + 1}/${chunks.length}: ${chunkInfo.startTimeInSource.toFixed(0)}s-${chunkInfo.endTimeInSource.toFixed(0)}s ⚠️ no segments`);
+          console.warn(`  ⚠️ No segments found for chunk ${chunkInfo.index + 1}`);
         }
 
       } catch (err) {
-        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.index + 1}/${chunks.length}: ${chunkInfo.startTimeInSource.toFixed(0)}s-${chunkInfo.endTimeInSource.toFixed(0)}s ❌ ${err.message}`);
+        console.error(`❌ Failed to process chunk ${chunkInfo.index + 1}: ${err.message}`);
       }
     }
 
@@ -478,28 +554,27 @@ async function processOneVideo(videoPath) {
     generateSRT(allSegments, srtPath);
 
     // Show timing verification for debugging
-    console.log(`[${ts()}] 📊 ${path.basename(videoPath)} | Timing verification:`);
-    console.log(`[${ts()}]   First segment: ${allSegments[0]?.start.toFixed(0)}s`);
-    console.log(`[${ts()}]   Last segment: ${allSegments[allSegments.length - 1]?.end.toFixed(0)}s`);
-    console.log(`[${ts()}]   Total video duration: ${totalDur.toFixed(0)}s`);
+    console.log(`📊 Timing verification:`);
+    console.log(`  First segment: ${allSegments[0]?.start.toFixed(1)}s`);
+    console.log(`  Last segment: ${allSegments[allSegments.length - 1]?.end.toFixed(1)}s`);
+    console.log(`  Total video duration: ${totalDur.toFixed(1)}s`);
 
   } catch (err) {
-    console.error(`[${ts()}] ❌ ${path.basename(videoPath)} | Failed to process: ${err.message}`);
+    console.error(`❌ Failed to process ${videoName}: ${err.message}`);
     throw err;
   } finally {
     try {
       await fsp.rm(tmpDir, {recursive: true, force: true});
-      console.log(`[${ts()}] ${path.basename(videoPath)} | Cleaned up temp dir`);
+      console.log(`Cleaned up temp dir`);
     } catch (e) {
-      console.warn(`[${ts()}] ${path.basename(videoPath)} | Warning: Could not clean up ${tmpDir}: ${e.message}`);
+      console.warn(`Warning: Could not clean up ${tmpDir}: ${e.message}`);
     }
   }
 }
 
 /* ---------------- Main execution ---------------- */
 async function main() {
-  // Only show essential config - remove debug output
-  console.log(`[${ts()}] 🚀 Voxtral Enhanced - Audio: ${AUDIO_QUALITY} (${audioConfig.rate}Hz), Chunks: ${CHUNK_SEC}s`);
+  console.log(`[${ts()}] 🚀 Voxtral Enhanced - CORRECTED TIMESTAMP VERSION`);
 
   try {
     if (!(await pathExists(inputPath))) {
@@ -517,6 +592,7 @@ async function main() {
       videoFiles.push(inputPath);
       logDir = path.dirname(inputPath);
     } else if (stat.isDirectory()) {
+      console.log(`[${ts()}] 📂 Scanning directory for video files: ${inputPath}`);
       const files = await fsp.readdir(inputPath);
       for (const file of files) {
         const fullPath = path.join(inputPath, file);
@@ -538,7 +614,11 @@ async function main() {
       throw new Error("No video files found");
     }
 
-    console.log(`[${ts()}] 📹 Found ${videoFiles.length} video file(s) to process`);
+    console.log(`[${ts()}] 📹 Found ${videoFiles.length} video file(s):`);
+    videoFiles.forEach((file, i) => {
+      const enhancedSrtPath = getEnhancedSrtPath(file);
+      console.log(`[${ts()}]   ${i + 1}. ${path.basename(file)} → ${path.basename(enhancedSrtPath)}`);
+    });
 
     // Process each video
     let processed = 0;
@@ -554,7 +634,10 @@ async function main() {
       }
     }
 
-    console.log(`[${ts()}] 📊 Summary: ✅ ${processed} processed, ❌ ${failed} failed`);
+    console.log(`[${ts()}] 📊 Summary:`);
+    console.log(`[${ts()}]   ✅ Processed: ${processed}`);
+    console.log(`[${ts()}]   ❌ Failed: ${failed}`);
+    console.log(`[${ts()}]   📝 Log: ${logPath}`);
 
     if (failed > 0) {
       process.exit(1);
@@ -573,9 +656,10 @@ async function main() {
 // Check dependencies and run
 (async () => {
   try {
-    // Silent dependency check
+    // Check ffmpeg
     await run("ffmpeg", ["-version"]);
     await run("ffprobe", ["-version"]);
+    console.log(`[${ts()}] ✓ FFmpeg found`);
 
     await main();
   } catch (err) {
