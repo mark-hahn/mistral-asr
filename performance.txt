@@ -98,6 +98,32 @@ If you see many exclusions or specific phrases being removed, that indicates the
   run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=1200 test  3 mins 
   21:40 -> 22:36
 
-  run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=900 test  
+  1) run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=900 test  
   Karen Pirie S01E01 90mins --  6 mins -- $1.74 -> $1.94
-  lost sync at 6:99
+  test/Karen Pirie S01E01 1080p ITV WEB-DL AAC 2.0 H.264-WhiskeyJack.enx.srt-1
+  test/voxtral-srt.log-1
+  lost sync ~ 6:00
+
+  2) run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=300 test  
+  Karen Pirie S01E01 90mins -- 10 mins  $0.18  ($1.94 -> $2.12)
+
+  timing err: is 7:42 (468.3s) s.b. 8:12 (492s)  24s error
+
+  3) asr --debug --test-mins=9 --chunk-sec=300 test 
+  Karen Pirie S01E01 9mins -- 0:40
+
+6:20 1:28  Segment 24: 386s - 389.6s: "She's there. She's there."
+
+6:33 1:39  missing: "Rosie"
+6:37 1:43  missing: "Rosie"
+
+correct ...
+8:20 3:20  Segment 25: 192s - 195s: "I'm walking amongst the ruins"
+wrong ...
+7:48 2:48  Segment 25: 168s - 171s: "I'm walking amongst the ruins"
+
+  4) asr --debug --test-mins=9 --chunk-sec=30 --chunk-overlap=15 test 
+  Karen Pirie S01E01 9mins -- 1.5mins $2.19 -> $2.19
+
+
+

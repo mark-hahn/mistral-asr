@@ -2,7 +2,7 @@
 
 # Simple Voxtral Background Wrapper
 # Usage: ./run [voxtral-options] <input-path>
-# run --audio-quality=high --chunk-sec=90 test
+# run --chunk-sec=300 test
 
 set -euo pipefail
 

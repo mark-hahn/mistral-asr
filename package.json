@@ -2,6 +2,7 @@
   "type": "module",
   "dependencies": {
     "@mistralai/mistralai": "^1.10.0",
-    "axios": "^1.11.0"
+    "axios": "^1.11.0",
+    "node-fetch": "^3.3.2"
   }
 }

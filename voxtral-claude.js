@@ -3,26 +3,6 @@
 // https://docs.mistral.ai/capabilities/audio/
 // https://console.mistral.ai/usage
 
-/**
- * Usage:
- *   node voxtral-claude.js [options] <video-file-or-folder>
- * 
- * High accuracy Recommended:
- *   node voxtral-claude.js --audio-quality=high --chunk-sec=90 --silence-aware test
- * 
- * Maximum accuracy:
- *   node voxtral-claude.js --audio-quality=max --consensus --retries=3 --chunk-sec=60 test
- * 
- * Balanced Quality/Speed
- *   node voxtral-claude.js --audio-quality=medium --chunk-sec=120 test
- * 
- * With overlap and silence detection:
- *   node voxtral-claude.js --silence-aware --chunk-overlap=3 --chunk-sec=60 test
- * 
- * Debug mode:
- *   node voxtral-claude.js --debug --test-mins=2 test
- */
-
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
@@ -57,17 +37,17 @@ function getNum(name, dflt) {
 }
 
 // Configuration - ALL variables defined here
-const CHUNK_SEC = getNum("--chunk-sec", 90);
+const CHUNK_SEC = getNum("--chunk-sec", 30);
 const CHUNK_OVERLAP = getNum("--chunk-overlap", 3);
 const SILENCE_AWARE = switches.has("--silence-aware") || !switches.has("--no-silence-aware");
-const AUDIO_QUALITY = flagsKVP.get("--audio-quality") || "medium";
+const AUDIO_QUALITY = flagsKVP.get("--audio-quality") || "max";
 const ENABLE_PREPROCESSING = !switches.has("--no-preprocess");
 const ENABLE_NOISE_REDUCTION = !switches.has("--no-denoise");
-const TRANSCRIPTION_RETRIES = getNum("--retries", 1);
+const TRANSCRIPTION_RETRIES = getNum("--retries", 3);
 const ENABLE_CONSENSUS = switches.has("--consensus");
 const TEST_MINS = getNum("--test-mins", 0);
-const CONSENSUS_METHOD = flagsKVP.get("--consensus-method") || "smart";
-const API_TEMPERATURE = getNum("--temperature", 0.1);
+const CONSENSUS_METHOD = flagsKVP.get("--consensus-method") || "simple";
+const API_TEMPERATURE = getNum("--temperature", 0);
 const API_RESPONSE_FORMAT = flagsKVP.get("--response-format") || "verbose_json";
 const API_PROMPT = flagsKVP.get("--prompt") || null;
 const ENABLE_DEBUG = switches.has("--debug");
@@ -89,6 +69,7 @@ if (positional.length === 0) {
 }
 
 const inputPath = path.resolve(positional[0]);
+let logDir;
 
 /* ---------------- API Key and setup ---------------- */
 const KEY_PATH = path.resolve("secrets/mistral-asr-key.txt");
@@ -111,14 +92,14 @@ const FILE_LIMIT = 100 * 1024 * 1024;
 function ts() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function tsPrecise() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   const pad3 = (n) => String(n).padStart(3, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
+  return `${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 let debugLogPath = null;
@@ -589,12 +570,17 @@ async function prepareLosslessUpload(partWavPath, tmpDir) {
 }
 
 async function transcribeViaAxios(uploadPath, mime, chunkInfo) {
-  debugLog(`\n\nAPI Call: Starting transcription for ${path.basename(uploadPath)}`);
+  debugLog(`\n\nAPI Call: Starting transcription for ${uploadPath}`);
   debugLog(`API Call: File size=${(await fsp.stat(uploadPath)).size} bytes`);
   debugLog(`API Call: MIME type=${mime}`);
   debugLog(`API Call: Chunk ${chunkInfo.index} (${chunkInfo.startTimeInSource.toFixed(6)}s - ${chunkInfo.endTimeInSource.toFixed(6)}s)`);
 
   const buf = await fsp.readFile(uploadPath);
+
+  // const audioPath = logDir + '/' + path.basename(uploadPath);
+  // debugLog(`writing flac file: ${audioPath}`);
+  // await fsp.writeFile(audioPath, buf);
+
   const form = new FormData();
 
   form.append("file", buf, {
@@ -630,7 +616,7 @@ async function transcribeViaAxios(uploadPath, mime, chunkInfo) {
         Authorization: `Bearer ${API_KEY}`,
         ...form.getHeaders()
       },
-      timeout: 300000
+      timeout: 60000
     }
   );
 
@@ -955,7 +941,7 @@ function processSegments(segments, chunkInfo) {
     const globalStart = chunkInfo.startTimeInSource + seg.start;
     const globalEnd = chunkInfo.startTimeInSource + seg.end;
 
-    debugLog(`  Global timestamps: ${globalStart.toFixed(6)}s - ${globalEnd.toFixed(6)}s`);
+    debugLog(`  Global timestamps: ${globalStart.toFixed(1)}s - ${globalEnd.toFixed(1)}s`);
 
     if (globalEnd <= globalStart) {
       debugLog(`  SKIPPED: Invalid timing (end <= start)`);
@@ -1139,7 +1125,7 @@ async function main() {
 
     const stat = await fsp.stat(inputPath);
     const videoFiles = [];
-    let logDir = path.dirname(inputPath);
+    logDir = path.dirname(inputPath);
 
     if (stat.isFile()) {
       if (!isVideoFile(inputPath)) {
