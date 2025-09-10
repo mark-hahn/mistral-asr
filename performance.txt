@@ -13,7 +13,7 @@
     00:08:01 -> As far as I'm concerned, he's just another ex.
     00:08:01 -> The panther don't hang around an old kill
  ❌ 00:08:01 -> he (-just) slinks on through the jungle.
- 
+  
   high ...
     node voxtral-claude.js --audio-quality=high --chunk-sec=90 --silence-aware test
     10 mins  $0.04  ended: $0.68
@@ -45,3 +45,59 @@
  ❌ As far as I'm concerned, he's just another egg.
  ❌ The panther don't hang around and all kill.
  ✅  He just slinks on through the jungle
+
+  maximum ...
+    run.sh --debug --audio-quality=max --consensus --retries=3 --chunk-sec=60 test
+    started 
+
+run.sh --debug --test-mins=2 --audio-quality=max --consensus --retries=3 --chunk-sec=60 test
+
+# Test 60s chunks without preprocessing
+./run.sh --debug --test-mins=2 --no-preprocess --chunk-sec=60 test
+
+run.sh --debug  --audio-quality=max --consensus --retries=3 --chunk-sec=60 test
+
+
+To check if segments are being excluded during deduplication, search the debug log for these specific patterns:
+
+Search terms:
+
+    "EXCLUDED:" - Shows segments that were removed
+
+EXCLUDED: Very similar text (>80%)
+EXCLUDED: Existing segment is longer/better
+
+    "REPLACED:" - Shows when a segment replaced an existing one
+
+REPLACED: Existing segment (current is longer)
+
+    Deduplication summary line:
+
+Deduplication: Result: X → Y segments (Z duplicates removed)
+
+What to look for:
+
+    High duplicate removal: If you see "50 duplicates removed" that might be too aggressive
+    Specific phrases being excluded: Search for your known missing phrases
+    Overlap percentage: Look for segments excluded with low overlap (should only exclude >70% overlap)
+    Text similarity percentage: Should only exclude >80% similarity
+
+Expected normal behavior:
+
+    Most segments should show no deduplication messages (no significant overlaps)
+    Only a few segments should be excluded, and only when they're genuine duplicates
+    The deduplication summary should show a small number of duplicates removed (maybe 5-10 for a 28-minute video)
+
+If you see many exclusions or specific phrases being removed, that indicates the deduplication logic is too aggressive.
+
+
+ run.sh --debug  --temperature=0 --audio-quality=max --consensus --retries=3
+ --chunk-sec=60 test
+
+  run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=600 test  4 mins
+  run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=1200 test  3 mins 
+  21:40 -> 22:36
+
+  run.sh --temperature=0 --audio-quality=max --consensus --retries=3 --chunk-sec=900 test  
+  Karen Pirie S01E01 90mins --  6 mins -- $1.74 -> $1.94
+  lost sync at 6:99

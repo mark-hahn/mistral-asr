@@ -104,8 +104,7 @@ try {
 const MODEL = "voxtral-mini-latest";
 const FORCE_LANGUAGE = "en";
 const ALLOWED_EXT = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
-// const FILE_LIMIT = 19 * 1024 * 1024;
-const FILE_LIMIT = 100 * 1024 * 1024;
+const FILE_LIMIT = 19 * 1024 * 1024;
 
 /* ---------------- Timestamped logging setup ---------------- */
 function ts() {
