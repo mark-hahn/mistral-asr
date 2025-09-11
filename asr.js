@@ -36,16 +36,7 @@ function getNum(name, dflt) {
   }
   return dflt;
 }
-
-// Configuration - ALL variables defined here
-// 300s -> 14 mB flac
-// normal overlap ...
-//      tttoooCCCCCCCCooottt
-// CCCCCCCCooottt
-// min size last chunk ...
-//      tttooottt
-// CCCCCCCCooottt
-
+// 300s -> 14 Mb flac
 const chunkSec =              getNum("--chunk-sec",  300);
 const trimSec =               getNum("--trim-sec",    20);
 const overlapSec =            getNum("--overlap-sec", 20);
@@ -178,10 +169,7 @@ async function extractAudio(inputVideo, outWav) {
   ];
   if (testMins > 0) args.push("-t", String(testMins * 60));
   args.push(outWav);
-
   await run("ffmpeg", args);
-
-  const stat = await fsp.stat(outWav);
 }
 
 async function preprocessAudio(inputWav, outputWav) {
@@ -212,14 +200,31 @@ async function preprocessAudio(inputWav, outputWav) {
     outputWav
   ]);
 }
+// chunkSec=20 trimSec=3 overlapSec=3 offsetSec=11 minChunkSec=6
+// t:trim o:overlap C:exclusive content
+// 
+// normal middle chunks ...
+// tttoooCCCCCCCCooottt  tttoooCCCCCCCCooottt
+//            tttoooCCCCCCCCooottt
+
+// first chunk ...
+// CCCCCCCCCCCCCCooottt  tttoooCCCCCCCCooottt
+//            tttoooCCCCCCCCooottt
+
+// min size last chunk ...
+// tttoooCCCCCCCCooottt
+//            tttoooCCC
 
 async function getChunks(inWav) {
   const totalDuration = await getDurationSec(inWav);
-  const chunks = [];
-  let chunkCount = Math.ceil(totalDuration / offsetSec);
+  let chunkCount      = Math.ceil(totalDuration / offsetSec);
+  const chunks        = [];
   for(let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
     const chunkStart = chunkIndex * offsetSec;
     const chunkEnd   = Math.min(chunkStart + chunkSec, totalDuration);
+    const trimStart  = (chunkIndex == 0) ? chunkStart : chunkStart + trimSec;
+    const trimEnd    = (chunkIndex == (chunkCount - 1)) 
+                                         ? chunkEnd : chunkEnd - trimSec;
     if((chunkEnd - chunkStart) < minChunkSec) break;
     const wavPath = 
         path.join(tmpDir, `chunk-${String(chunkIndex).padStart(3, "0")}.wav`);
@@ -231,13 +236,14 @@ async function getChunks(inWav) {
       "-avoid_negative_ts", "make_zero",
       wavPath
     ]);
-    chunks.push({ wavPath, chunkIndex, chunkStart, chunkEnd });
+    chunks.push({ wavPath, chunkIndex, chunkStart, chunkEnd, 
+                                       trimStart, trimEnd });
   }
   return chunks;
 }
 
 /* ---------------- Transcription ---------------- */
-async function getFlacs(wavPath) {
+async function getFlac(wavPath) {
   const flacPath = path.join(tmpDir,
                    path.basename(wavPath, ".wav") + ".flac");
   await run("ffmpeg", [
@@ -245,14 +251,16 @@ async function getFlacs(wavPath) {
     "-c:a", "flac",
     flacPath
   ]);
-  const stat = await fsp.stat(flacPath);
-  if (stat.size > fileLimit) {
-    throw new Error(`FLAC file too large: ${stat.size} bytes > ${fileLimit} bytes`);
+  const statSize = (await fsp.stat(flacPath)).size;
+  if (statSize > fileLimit) {
+    console.error(`FLAC file too large: ${statSize} bytes > ${fileLimit} bytes`);
+    process.exit(1);
   }
   return {
-    path: flacPath,
-    mime: "audio/flac",
-    filename: path.basename(flacPath)
+    path:     flacPath,
+    mime:    "audio/flac",
+    filename: path.basename(flacPath),
+    size:     statSize
   };
 }
 
@@ -299,14 +307,17 @@ function processSegments(segments, chunkInfo) {
       console.error(`SKIPPED: Invalid segment (missing start/end/text)`);
       continue;
     }
+    const start = chunkInfo.chunkStart + seg.start;
+    const end   = chunkInfo.chunkStart + seg.end;
     const processedSegment = {
-      start:         chunkInfo.chunkStart + seg.start,
-      end:           chunkInfo.chunkStart + seg.end,
-      text:          seg.text.trim(),
-      chunkIndex:    chunkInfo.chunkIndex,
-      chunkStart:    chunkInfo.chunkStart,
-      chunkEnd:      chunkInfo.chunkEnd
+      start, end,
+      text:           seg.text.trim(),
+      chunkIndex:     chunkInfo.chunkIndex,
+      chunkStart:     chunkInfo.chunkStart,
+      chunkEnd:       chunkInfo.chunkEnd,
     };
+    if (start < chunkInfo.trimStart || 
+        end   > chunkInfo.trimEnd) continue;
     processedSegments.push(processedSegment);
   }
   return processedSegments;
@@ -336,7 +347,7 @@ function generateSRT(segments, outputPath) {
   }
 
   fs.writeFileSync(outputPath, srtContent, "utf8");
-  console.log(`[${ts()}] ✓ ${path.basename(outputPath)} written (${index - 1} captions)`);
+  console.log(`[${ts()}] ${path.basename(outputPath)} written (${index - 1} captions)`);
 }
 
 /* ---------------- Main processing function ---------------- */
@@ -354,6 +365,7 @@ async function processOneVideo(videoPath) {
     await extractAudio(videoPath, rawWavFile);
     let finalWavFile = rawWavFile;
     if (enablePreprocessing) {
+      console.log(`[${ts()}] Preprocessing audio...`);
       await preprocessAudio(rawWavFile, processedWavFile);
       finalWavFile = processedWavFile;
     }
@@ -361,55 +373,53 @@ async function processOneVideo(videoPath) {
     const chunks   = await getChunks(finalWavFile);
     console.log(`[${ts()}] Duration: ${totalDur.toFixed(0)}s, ${chunks.length} chunks`);
     const allSegments = [];
-    for (const chunkInfo of chunks) {
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      const chunkInfo = chunks[chunkIndex];
       try {
-        const uploadInfo = await getFlacs(chunkInfo.wavPath, tmpDir);
+        const uploadInfo = await getFlac(chunkInfo.wavPath, chunkIndex);
         const response   = await callApi(uploadInfo);
         if (response.segments && response.segments.length > 0) {
           const processedSegments = processSegments(response.segments, chunkInfo);
           allSegments.push(...processedSegments);
           console.log(`[${ts()}] Chunk ${
             (chunkInfo.chunkIndex + 1).toString().padStart(3)}: ${
-            (chunkInfo.chunkStart).toString().padStart(4)} ${
-            (chunkInfo.chunkEnd).toString().padStart(4)}${
+            (chunkInfo.chunkStart).toString().padStart(4)}s ${
+            (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
+            Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ${
             processedSegments.length.toString().padStart(3)} segments`);
           continue;
         } 
         else {
           console.log(`[${ts()}] Chunk ${
             (chunkInfo.chunkIndex + 1).toString().padStart(3)}: ${
-            (chunkInfo.chunkStart).toString().padStart(4)} ${
-            (chunkInfo.chunkEnd).toString().padStart(4)} ⚠️ no segments`);
+            (chunkInfo.chunkStart).toString().padStart(4)}s ${
+            (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
+            Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ⚠️ no segments`);
           continue;
         }
       } catch (err) {
         console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.chunkIndex + 1}/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
       }
     }
-    if (allSegments.length === 0) 
-        throw new Error("No transcription segments found");
-    let lastIdx      = -1;
-    let lastInHalf2  = false;
+    if (allSegments.length === 0) {
+      console.error("No transcription segments found");
+      process.exit(1);
+    }
+    let lastIdx       = -1;
+    let lastInOverlap = false;
     for(const segment of allSegments) {
-      const inTopMgn = segment.start < segment.chunkStart + 5;
-      const inHalf2  = (segment.start + segment.end)/2 > segment.chunkStart + halfChunkSec;
-      const inBotMgn = segment.end   > segment.chunkStart + chunkSec - 5;
+      const inOverlap   = segment.start < segment.chunkStart + segment
+                       || segment.end  > segment.chunkStart + chunkSec - 5;
       if (segment.chunkIndex != lastIdx) {
         console.log(`\nChunk ${(segment.chunkIndex + 1)}: ${
           segment.chunkStart}  ${
           segment.chunkEnd}`);
         lastIdx = segment.chunkIndex;
-        lastInHalf2 = false;
       }
-      else {
-        if (inHalf2 != lastInHalf2) console.log();
-        lastInHalf2 = inHalf2;
-      }
-      if (!(inTopMgn || inBotMgn))
-        console.log(`${
-          segment.start.toFixed(1).padStart(6)} ${
-          segment.end.toFixed(1).padStart(6)}  ${
-          segment.text}`);
+      console.log(`${
+        segment.start.toFixed(1).padStart(6)} ${
+        segment.end.toFixed(1).padStart(6)}  ${
+        segment.text}`);
     }
   } catch (err) {
     console.error(`[${ts()}] ❌ ${path.basename(videoPath)} | Failed to process: ${err.message}`);
