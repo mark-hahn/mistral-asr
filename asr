@@ -8,14 +8,14 @@ set -euo pipefail
 
 # Find the voxtral script in the same directory as this wrapper
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VOXTRAL_SCRIPT="${SCRIPT_DIR}/voxtral-claude.js"
+VOXTRAL_SCRIPT="${SCRIPT_DIR}/asr.js"
 
 # Check if voxtral script exists
 if [[ ! -f "$VOXTRAL_SCRIPT" ]]; then
-    if [[ -f "./voxtral-claude.js" ]]; then
-        VOXTRAL_SCRIPT="./voxtral-claude.js"
+    if [[ -f "./asr.js" ]]; then
+        VOXTRAL_SCRIPT="./asr.js"
     else
-        echo "ERROR: voxtral-claude.js not found" >&2
+        echo "ERROR: asr.js not found" >&2
         exit 1
     fi
 fi

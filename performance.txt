@@ -15,7 +15,7 @@
  ❌ 00:08:01 -> he (-just) slinks on through the jungle.
   
   high ...
-    node voxtral-claude.js --audio-quality=high --chunk-sec=90 --silence-aware test
+    node asr.js --audio-quality=high --chunk-sec=90 --silence-aware test
     10 mins  $0.04  ended: $0.68
  ✅  I've drawn all my savings out of the bank.
  ❌  I should have said this when I first bought it.
@@ -31,7 +31,7 @@
  ✅  He just slinks on through the jungle.
  
   Balanced ...
-    node voxtral-claude.js --audio-quality=medium --chunk-sec=120 test
+    node asr.js --audio-quality=medium --chunk-sec=120 test
     8 mins   $0.08  ended: $0.76
  ✅  I've drawn all my savings out of the bank.
  ❌ I should have said this when I first bought it.
@@ -122,8 +122,10 @@ correct ...
 wrong ...
 7:48 2:48  Segment 25: 168s - 171s: "I'm walking amongst the ruins"
 
-  4) asr --debug --test-mins=9 --chunk-sec=30 --chunk-overlap=15 test 
+node asr.js --test-mins=2 --chunk-sec=30 test 
   Karen Pirie S01E01 9mins -- 1.5mins $2.19 -> $2.19
 
+      "args": ["--test-mins=1",  "--chunk-sec=30",  
+               "--chunk-overlap=15", "test"]
 
 

@@ -4,3 +4,4 @@ old-test/
 secrets/
 node_modules/
 .vscode/bookmarks.json
+tmp/
