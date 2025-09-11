@@ -38,59 +38,71 @@ function getNum(name, dflt) {
 }
 
 // Configuration - ALL variables defined here
-const CHUNK_SEC = getNum("--chunk-sec", 30);
-const AUDIO_QUALITY = flagsKVP.get("--audio-quality") || "max";
-const ENABLE_PREPROCESSING = !switches.has("--no-preprocess");
-const ENABLE_NOISE_REDUCTION = !switches.has("--no-denoise");
-const TEST_MINS = getNum("--test-mins", 0);
-const API_TEMPERATURE = getNum("--temperature", 0);
-const API_RESPONSE_FORMAT = flagsKVP.get("--response-format") || "verbose_json";
-const API_PROMPT = flagsKVP.get("--prompt") || null;
+// 300s -> 14 mB flac
+// normal overlap ...
+//      tttoooCCCCCCCCooottt
+// CCCCCCCCooottt
+// min size last chunk ...
+//      tttooottt
+// CCCCCCCCooottt
 
-const chunkSec     = CHUNK_SEC;
-const halfChunkSec = Math.floor(chunkSec / 2);
+const chunkSec =              getNum("--chunk-sec",  300);
+const trimSec =               getNum("--trim-sec",    20);
+const overlapSec =            getNum("--overlap-sec", 20);
+const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
+const minChunkSec =           trimSec + overlapSec + trimSec;
+const audioQuality =          flagsKVP.get("--audio-quality") || "max";
+const enablePreprocessing =  !switches.has("--no-preprocess");
+const enableNoiseReduction = !switches.has("--no-denoise");
+const testMins =              getNum("--test-mins", 0);
+const apiTemperature =        getNum("--temperature", 0);
+const apiResponseFormat =     flagsKVP.get("--response-format") || "verbose_json";
+const apiPrompt =             flagsKVP.get("--prompt") || null;
 
 // Audio quality settings
 const AUDIO_CONFIGS = {
-  low: {rate: 16000, bitrate: "64k"},
+  low:    {rate: 16000, bitrate: "64k"},
   medium: {rate: 22050, bitrate: "128k"},
-  high: {rate: 44100, bitrate: "192k"},
-  max: {rate: 48000, bitrate: "256k"}
+  high:   {rate: 44100, bitrate: "192k"},
+  max:    {rate: 48000, bitrate: "256k"}
 };
-const audioConfig = AUDIO_CONFIGS[AUDIO_QUALITY];
+const audioConfig = AUDIO_CONFIGS[audioQuality];
 
 /* ---------------- Input validation ---------------- */
 if (positional.length === 0) {
   console.error("❌ Error: No input file specified");
   process.exit(1);
 }
-
 const inputPath = path.resolve(positional[0]);
-let logDir;
 
 /* ---------------- API Key and setup ---------------- */
-const KEY_PATH = path.resolve("secrets/mistral-asr-key.txt");
-let API_KEY;
-
+const keyPath = path.resolve("secrets/mistral-asr-key.txt");
+let apiKey;
 try {
-  API_KEY = fs.readFileSync(KEY_PATH, "utf8").trim();
+  apiKey = fs.readFileSync(keyPath, "utf8").trim();
 } catch (e) {
-  console.error(`❌ Unable to read API key from ${KEY_PATH}: ${e.message}`);
+  console.error(`❌ Unable to read API key from ${keyPath}: ${e.message}`);
   process.exit(1);
 }
 
-const MODEL = "voxtral-mini-latest";
-const FORCE_LANGUAGE = "en";
-const ALLOWED_EXT = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
-const FILE_LIMIT = 19 * 1024 * 1024;
+const model         = "voxtral-mini-latest";
+const forceLanguage = "en";
+const allowedExt    = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
+const fileLimit     = 19 * 1024 * 1024;
 
 let scriptStart = Date.now();
 
-/* ---------------- Timestamped logging setup ---------------- */
+/* ---------------- format timestamp for logging  ---------------- */
 function ts() {
-  const d = new Date(Date.now() - scriptStart);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getHours()-16)}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const secs    = Math.floor((Date.now() - scriptStart) / 1000);
+  const hours   = Math.floor(secs / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  const seconds = secs % 60;
+  return (
+    String(hours)  .padStart(2, "0") + ":" +
+    String(minutes).padStart(2, "0") + ":" +
+    String(seconds).padStart(2, "0")
+  );
 }
 
 /* ---------------- Utility functions ---------------- */
@@ -110,7 +122,7 @@ function getSrtPath(videoPath) {
 }
 
 function isVideoFile(p) {
-  return ALLOWED_EXT.has(path.extname(p).toLowerCase());
+  return allowedExt.has(path.extname(p).toLowerCase());
 }
 
 function toSrtTime(totalSec) {
@@ -164,7 +176,7 @@ async function extractAudio(inputVideo, outWav) {
     "-b:a", audioConfig.bitrate,
     "-vn"
   ];
-  if (TEST_MINS > 0) args.push("-t", String(TEST_MINS * 60));
+  if (testMins > 0) args.push("-t", String(testMins * 60));
   args.push(outWav);
 
   await run("ffmpeg", args);
@@ -174,10 +186,12 @@ async function extractAudio(inputVideo, outWav) {
 
 async function preprocessAudio(inputWav, outputWav) {
   const filters = [];
-  if (ENABLE_NOISE_REDUCTION) {
+  if (enableNoiseReduction) {
     filters.push(
       "highpass=f=80",
       "lowpass=f=8000",
+      // acompressor=threshold=0.003 (0-1) means volume reduced to 1/ratio
+      // threshold too low?
       "acompressor=threshold=0.003:ratio=3:attack=30:release=1000",
       "agate=threshold=0.001:ratio=2:attack=10:release=100"
     );
@@ -202,10 +216,11 @@ async function preprocessAudio(inputWav, outputWav) {
 async function getChunks(inWav) {
   const totalDuration = await getDurationSec(inWav);
   const chunks = [];
-  let chunkCount = Math.floor(totalDuration / halfChunkSec);
+  let chunkCount = Math.ceil(totalDuration / offsetSec);
   for(let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
-    const chunkStart = chunkIndex * halfChunkSec;
-    const chunkEnd   = chunkStart + chunkSec;
+    const chunkStart = chunkIndex * offsetSec;
+    const chunkEnd   = Math.min(chunkStart + chunkSec, totalDuration);
+    if((chunkEnd - chunkStart) < minChunkSec) break;
     const wavPath = 
         path.join(tmpDir, `chunk-${String(chunkIndex).padStart(3, "0")}.wav`);
     await run("ffmpeg", [
@@ -216,11 +231,7 @@ async function getChunks(inWav) {
       "-avoid_negative_ts", "make_zero",
       wavPath
     ]);
-    chunks.push({
-      wavPath,
-      index: chunkIndex,
-      chunkStart, chunkEnd
-    });
+    chunks.push({ wavPath, chunkIndex, chunkStart, chunkEnd });
   }
   return chunks;
 }
@@ -235,8 +246,8 @@ async function getFlacs(wavPath) {
     flacPath
   ]);
   const stat = await fsp.stat(flacPath);
-  if (stat.size > FILE_LIMIT) {
-    throw new Error(`FLAC file too large: ${stat.size} bytes > ${FILE_LIMIT} bytes`);
+  if (stat.size > fileLimit) {
+    throw new Error(`FLAC file too large: ${stat.size} bytes > ${fileLimit} bytes`);
   }
   return {
     path: flacPath,
@@ -253,19 +264,19 @@ async function callApi(uploadInfo) {
       filename:    uploadInfo.filename,
       contentType: uploadInfo.mime
     });
-    form.append("model", MODEL);
-    form.append("language", FORCE_LANGUAGE);
+    form.append("model", model);
+    form.append("language", forceLanguage);
     form.append("timestamp_granularities", "segment");
-    form.append("response_format", API_RESPONSE_FORMAT);
-    form.append("temperature", String(API_TEMPERATURE));
-    if (API_PROMPT) form.append("prompt", API_PROMPT);
+    form.append("response_format", apiResponseFormat);
+    form.append("temperature", String(apiTemperature));
+    if (apiPrompt) form.append("prompt", apiPrompt);
 
     const response = await axios.post(
       "https://api.mistral.ai/v1/audio/transcriptions",
       form,
       {
         headers: {
-          Authorization: `Bearer ${API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
           ...form.getHeaders()
         },
         timeout: 60000
@@ -292,7 +303,7 @@ function processSegments(segments, chunkInfo) {
       start:         chunkInfo.chunkStart + seg.start,
       end:           chunkInfo.chunkStart + seg.end,
       text:          seg.text.trim(),
-      chunkIndex:    chunkInfo.index,
+      chunkIndex:    chunkInfo.chunkIndex,
       chunkStart:    chunkInfo.chunkStart,
       chunkEnd:      chunkInfo.chunkEnd
     };
@@ -337,9 +348,8 @@ async function processOneVideo(videoPath) {
     console.log(`\n${videoName}: Enhanced SRT already exists, skipping.`);
     return;
   }
-  const rawWavFile          = path.join(tmpDir, "audio_raw.wav");
-  const processedWavFile    = path.join(tmpDir, "audio_processed.wav");
-  const enablePreprocessing = ENABLE_PREPROCESSING;
+  const rawWavFile       = path.join(tmpDir, "audio_raw.wav");
+  const processedWavFile = path.join(tmpDir, "audio_processed.wav");
   try {
     await extractAudio(videoPath, rawWavFile);
     let finalWavFile = rawWavFile;
@@ -359,7 +369,7 @@ async function processOneVideo(videoPath) {
           const processedSegments = processSegments(response.segments, chunkInfo);
           allSegments.push(...processedSegments);
           console.log(`[${ts()}] Chunk ${
-            (chunkInfo.index + 1).toString().padStart(3)}: ${
+            (chunkInfo.chunkIndex + 1).toString().padStart(3)}: ${
             (chunkInfo.chunkStart).toString().padStart(4)} ${
             (chunkInfo.chunkEnd).toString().padStart(4)}${
             processedSegments.length.toString().padStart(3)} segments`);
@@ -367,13 +377,13 @@ async function processOneVideo(videoPath) {
         } 
         else {
           console.log(`[${ts()}] Chunk ${
-            (chunkInfo.index + 1).toString().padStart(3)}: ${
+            (chunkInfo.chunkIndex + 1).toString().padStart(3)}: ${
             (chunkInfo.chunkStart).toString().padStart(4)} ${
             (chunkInfo.chunkEnd).toString().padStart(4)} ⚠️ no segments`);
           continue;
         }
       } catch (err) {
-        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.index + 1}/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
+        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.chunkIndex + 1}/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
       }
     }
     if (allSegments.length === 0) 
@@ -381,7 +391,9 @@ async function processOneVideo(videoPath) {
     let lastIdx      = -1;
     let lastInHalf2  = false;
     for(const segment of allSegments) {
-      const inHalf2 = segment.start > segment.chunkStart + halfChunkSec;
+      const inTopMgn = segment.start < segment.chunkStart + 5;
+      const inHalf2  = (segment.start + segment.end)/2 > segment.chunkStart + halfChunkSec;
+      const inBotMgn = segment.end   > segment.chunkStart + chunkSec - 5;
       if (segment.chunkIndex != lastIdx) {
         console.log(`\nChunk ${(segment.chunkIndex + 1)}: ${
           segment.chunkStart}  ${
@@ -393,10 +405,11 @@ async function processOneVideo(videoPath) {
         if (inHalf2 != lastInHalf2) console.log();
         lastInHalf2 = inHalf2;
       }
-      console.log(`${
-         segment.start.toFixed(1).padStart(6)} ${
-         segment.end.toFixed(1).padStart(6)}  ${
-         segment.text}`);
+      if (!(inTopMgn || inBotMgn))
+        console.log(`${
+          segment.start.toFixed(1).padStart(6)} ${
+          segment.end.toFixed(1).padStart(6)}  ${
+          segment.text}`);
     }
   } catch (err) {
     console.error(`[${ts()}] ❌ ${path.basename(videoPath)} | Failed to process: ${err.message}`);
@@ -407,17 +420,17 @@ async function processOneVideo(videoPath) {
 /* ---------------- Main execution ---------------- */
 async function main() {
   console.log(`Voxtral Configuration:`);
-  console.log(`   Audio Quality: ${AUDIO_QUALITY} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
-  console.log(`   Chunk Duration: ${CHUNK_SEC}s`);
-  console.log(`   Preprocessing: ${ENABLE_PREPROCESSING}`);
-  console.log(`   Noise Reduction: ${ENABLE_NOISE_REDUCTION}`);
-  console.log(`   Test Mode: ${TEST_MINS > 0 ? `${TEST_MINS} minutes` : 'OFF'}`);
-  console.log(`   API Model: ${MODEL}`);
-  console.log(`   API Language: ${FORCE_LANGUAGE}`);
-  console.log(`   API Temperature: ${API_TEMPERATURE}`);
-  console.log(`   API Response Format: ${API_RESPONSE_FORMAT}`);
-  console.log(`   API Prompt: ${API_PROMPT || 'None'}`);
-  console.log(`   File Size Limit: ${(FILE_LIMIT / 1024 / 1024).toFixed(1)}MB`);
+  console.log(`   Audio Quality: ${audioQuality} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
+  console.log(`   Chunk Duration: ${chunkSec}s`);
+  console.log(`   Preprocessing: ${enablePreprocessing}`);
+  console.log(`   Noise Reduction: ${enableNoiseReduction}`);
+  console.log(`   Test Mode: ${testMins > 0 ? `${testMins} minutes` : 'OFF'}`);
+  console.log(`   API Model: ${model}`);
+  console.log(`   API Language: ${forceLanguage}`);
+  console.log(`   API Temperature: ${apiTemperature}`);
+  console.log(`   API Response Format: ${apiResponseFormat}`);
+  console.log(`   API Prompt: ${apiPrompt || 'None'}`);
+  console.log(`   File Size Limit: ${(fileLimit / 1024 / 1024).toFixed(1)}MB`);
   console.log();
 
   try {
@@ -426,14 +439,12 @@ async function main() {
     }
     const stat = await fsp.stat(inputPath);
     const videoFiles = [];
-    logDir = path.dirname(inputPath);
 
     if (stat.isFile()) {
       if (!isVideoFile(inputPath)) {
         throw new Error(`File is not a supported video format: ${inputPath}`);
       }
       videoFiles.push(inputPath);
-      logDir = path.dirname(inputPath);
     } else if (stat.isDirectory()) {
       const files = await fsp.readdir(inputPath);
       for (const file of files) {
@@ -443,7 +454,6 @@ async function main() {
           videoFiles.push(fullPath);
         }
       }
-      logDir = inputPath;
     } else {
       throw new Error(`Input is neither file nor directory: ${inputPath}`);
     }
