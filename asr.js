@@ -3,7 +3,7 @@
 // https://docs.mistral.ai/capabilities/audio/
 // https://console.mistral.ai/usage
 
-const DUMP_ALL_SEGS = true;
+const DUMP_ALL_SEGS = false;
 
 import fs from "fs";
 import fsp from "fs/promises";
@@ -387,12 +387,16 @@ function writeSRT(segments, outputPath) {
     const start = segment.start;
     const end   = segment.end;
     const text  = segment.text.trim();
-    if(text.includes('Oh!')) debugger;
+    // if(text.includes('Oh!')) debugger;
     try {
       skipSeg  = true;
       if (text.length == 0) continue;
-      if((start >= lastStart && start <= lastEnd) ||
-         (end   >= lastStart && end   <= lastEnd)) {
+      // if(start == lastEnd) {
+      //   segOut[segOut.length-1] += (' ' + text);
+      //   continue;
+      // }
+      if((start > lastStart && start < lastEnd) ||
+         (end   > lastStart && end   < lastEnd)) {
         if(text === lastText) continue;
         console.log(`\n[${ts()}] Overlapping segments ...`);
         console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`); 
@@ -453,6 +457,7 @@ async function processOneVideo(videoPath) {
       try {
         const uploadInfo = await getFlac(chunkInfo.wavPath);
         const apiData    = await callApi(uploadInfo);
+        console.log(JSON.stringify(apiData, null, 2));
         if (apiData.segments && apiData.segments.length > 0) {
           const processedSegments = processSegments(apiData.segments, chunkInfo);
           allSegments.push(...processedSegments);
