@@ -38,8 +38,8 @@ function getNum(name, dflt) {
   }
   return dflt;
 }
-// 300s -> 15 Mb flac
-const chunkSec =              getNum("--chunk-sec",  300);
+// 120s -> 5 Mb flac
+const chunkSec =              getNum("--chunk-sec",  120);
 const trimSec =               getNum("--trim-sec",    20);
 const overlapSec =            getNum("--overlap-sec", 10);
 const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
@@ -459,7 +459,8 @@ async function processOneVideo(videoPath) {
           allSegments.push(...processedSegments);
           if(DUMP_ALL_SEGS)
             console.log(`[${ts()}] Chunk ${
-              (chunkInfo.chunkIndex ).toString().padStart(3)}: ${
+              (chunkInfo.chunkIndex ).toString().padStart(3)}/${
+              (chunks.length).toString().padStart(3)} ${
               (chunkInfo.chunkStart).toString().padStart(4)}s ${
               (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
               Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ${
