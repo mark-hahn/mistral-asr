@@ -36,8 +36,8 @@ function getNum(name, dflt) {
   }
   return dflt;
 }
-// 300s -> 14 Mb flac
-const chunkSec =              getNum("--chunk-sec",  300);
+// 200s -> 10 Mb flac
+const chunkSec =              getNum("--chunk-sec",  200);
 const trimSec =               getNum("--trim-sec",    20);
 const overlapSec =            getNum("--overlap-sec", 10);
 const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
@@ -81,9 +81,8 @@ const forceLanguage = "en";
 const allowedExt    = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
 const fileLimit     = 19 * 1024 * 1024;
 
-let scriptStart = Date.now();
-
 /* ---------------- format timestamp for logging  ---------------- */
+let scriptStart = Date.now();
 function ts() {
   const secs    = Math.floor((Date.now() - scriptStart) / 1000);
   const hours   = Math.floor(secs / 3600);
@@ -273,8 +272,12 @@ async function getFlac(wavPath) {
   };
 }
 
+const MAX_RETRIES   = 5;
+const BASE_DELAY_MS = 5000;
+
 async function callApi(uploadInfo) {
   const buf = await fsp.readFile(uploadInfo.path);
+  const apiStart = Date.now();
   const form = new FormData();
   try {
       form.append("file", buf, {
@@ -287,22 +290,40 @@ async function callApi(uploadInfo) {
     form.append("response_format", apiResponseFormat);
     form.append("temperature", String(apiTemperature));
     if (apiPrompt) form.append("prompt", apiPrompt);
-
-    const response = await axios.post(
-      "https://api.mistral.ai/v1/audio/transcriptions",
-      form,
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          ...form.getHeaders()
-        },
-        timeout: 30000
+    let attempt = 0;
+    while (true) {
+      attempt ++;    
+      const response = await axios.post(
+        "https://api.mistral.ai/v1/audio/transcriptions", form,
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            ...form.getHeaders()
+          },
+          timeout: 90000 // 90 secs
+        }
+      );
+      // console.log(`API response received`, 
+      //             { status: response.status, data: response.data });
+      if (response.status == 200) {
+        response.data.delay = Date.now() - apiStart;
+        return response.data;
       }
-    );
-    return response.data;
+      if(attempt > MAX_RETRIES) {
+        console.error(`[${ts()}] API error, status: ${
+                                 response.status}, max retries reached`);
+        process.exit(1);
+      }
+      console.error(`[${ts()}] API error, status: ${response.status}, retrying`);
+      if (attempt == 1) console.log(JSON.stringify(uploadInfo, null, 2));
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await sleep(delay);
+      continue;
+    }
   }
   catch (err) {
-    console.error(`API call failed: ${err.message}`);
+    console.error(`API caught error: ${err.message}\n${
+                   JSON.stringify(uploadInfo, null, 2)}`);
     process.exit(1);
   }
 }
@@ -310,12 +331,11 @@ async function callApi(uploadInfo) {
 function processSegments(segments, chunkInfo) {
   if (!segments || segments.length === 0) return [];
   const processedSegments = [];
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
+  for (const segment of segments) {
     if (segment.start === undefined || segment.end === undefined 
                                     || !segment.text?.trim()) {
-      console.error(`Invalid segment (missing start/end/text) ${
-                     segment.wavPath})`);
+      console.error(`Invalid segment (missing start/end/text), chunk ${
+                         chunkInfo.chunkindex }`);
       process.exit(1);
     }
     const start = chunkInfo.chunkStart + segment.start;
@@ -325,6 +345,7 @@ function processSegments(segments, chunkInfo) {
       text:  segment.text.trim(),
       chunk: chunkInfo
     };
+    // if(segment.text.includes("picturesque")) debugger;
     if (start < chunkInfo.trimStart || 
         end   > chunkInfo.trimEnd) continue;
     processedSegments.push(processedSegment);
@@ -385,28 +406,29 @@ async function processOneVideo(videoPath) {
     for (const chunkInfo of chunks) {
       try {
         const uploadInfo = await getFlac(chunkInfo.wavPath);
-        const response   = await callApi(uploadInfo);
-        if (response.segments && response.segments.length > 0) {
-          const processedSegments = processSegments(response.segments, chunkInfo);
+        const apiData    = await callApi(uploadInfo);
+        if (apiData.segments && apiData.segments.length > 0) {
+          const processedSegments = processSegments(apiData.segments, chunkInfo);
           allSegments.push(...processedSegments);
           console.log(`[${ts()}] Chunk ${
-            (chunkInfo.chunkIndex + 1).toString().padStart(3)}: ${
+            (chunkInfo.chunkIndex ).toString().padStart(3)}: ${
             (chunkInfo.chunkStart).toString().padStart(4)}s ${
             (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
             Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ${
-            processedSegments.length.toString().padStart(3)} segments`);
+            processedSegments.length.toString().padStart(3)} segments, api:${
+            Math.round(apiData.delay/1000).toString().padStart(3)}s`);
           continue;
         } 
         else {
           console.log(`[${ts()}] Chunk ${
-            (chunkInfo.chunkIndex + 1).toString().padStart(3)}: ${
+            (chunkInfo.chunkindex ).toString().padStart(3)}: ${
             (chunkInfo.chunkStart).toString().padStart(4)}s ${
             (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
             Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ⚠️ no segments`);
           continue;
         }
       } catch (err) {
-        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.chunkIndex + 1}/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
+        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.chunkindex }/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
       }
     }
     if (allSegments.length === 0) {
@@ -420,7 +442,7 @@ async function processOneVideo(videoPath) {
       const inOverlap = segment.start < chunkInfo.overlapStart
                      || segment.end   > chunkInfo.overlapEnd;
       if (chunkInfo.chunkIndex != lastIdx) {
-        console.log(`\nChunk ${(chunkInfo.chunkIndex + 1)}: ${
+        console.log(`\nChunk ${(chunkInfo.chunkIndex )}: ${
           chunkInfo.chunkStart}  ${
           chunkInfo.trimStart}  ${
           chunkInfo.overlapStart}  ${
@@ -445,7 +467,7 @@ async function processOneVideo(videoPath) {
 
 /* ---------------- Main execution ---------------- */
 async function main() {
-  console.log(`Voxtral Configuration:`);
+  console.log(`\nConfiguration:`);
   console.log(`   Audio Quality: ${audioQuality} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
   console.log(`   Chunk Duration: ${chunkSec}s`);
   console.log(`   Preprocessing: ${enablePreprocessing}`);
