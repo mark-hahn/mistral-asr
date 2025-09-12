@@ -3,6 +3,8 @@
 // https://docs.mistral.ai/capabilities/audio/
 // https://console.mistral.ai/usage
 
+const DUMP_ALL_SEGS = true;
+
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
@@ -36,8 +38,8 @@ function getNum(name, dflt) {
   }
   return dflt;
 }
-// 200s -> 10 Mb flac
-const chunkSec =              getNum("--chunk-sec",  200);
+// 300s -> 15 Mb flac
+const chunkSec =              getNum("--chunk-sec",  300);
 const trimSec =               getNum("--trim-sec",    20);
 const overlapSec =            getNum("--overlap-sec", 10);
 const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
@@ -81,7 +83,7 @@ const forceLanguage = "en";
 const allowedExt    = new Set([".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"]);
 const fileLimit     = 19 * 1024 * 1024;
 
-/* ---------------- format timestamp for logging  ---------------- */
+/* ---------------- format logging timestamp  (HH:MM:SS.t) ---------------- */
 let scriptStart = Date.now();
 function ts() {
   const secs    = Math.floor((Date.now() - scriptStart) / 1000);
@@ -93,6 +95,27 @@ function ts() {
     String(minutes).padStart(2, "0") + ":" +
     String(seconds).padStart(2, "0")
   );
+}
+
+/* ---------- format video timestamp (H:MM:SS.t) ---------- */
+function vs(secs) {
+  // work in deciseconds for clean rounding/carry
+  let ds = Math.round(secs * 10);
+  const neg = ds < 0;
+  ds = Math.abs(ds);
+  let hours   = Math.floor(ds / 36000); // 3600s * 10
+  ds %= 36000;
+  let minutes = Math.floor(ds / 600);   // 60s * 10
+  ds %= 600;
+  let seconds = Math.floor(ds / 10);
+  let tenths  = ds % 10;
+  if (hours > 9) { hours = 9; minutes = 59; seconds = 59; tenths = 9; }
+  const out = '[' +
+    String(hours) + ":" +
+    String(minutes).padStart(2, "0") + ":" +
+    String(seconds).padStart(2, "0") + "." +
+    String(tenths) + ']';
+  return neg ? "-" + out : out;
 }
 
 /* ---------------- Utility functions ---------------- */
@@ -113,15 +136,6 @@ function getSrtPath(videoPath) {
 
 function isVideoFile(p) {
   return allowedExt.has(path.extname(p).toLowerCase());
-}
-
-function toSrtTime(totalSec) {
-  const totalMs = Math.max(0, Math.round(totalSec * 1000));
-  const h = String(Math.floor(totalMs / 3600000)).padStart(2, "0");
-  const m = String(Math.floor((totalMs % 3600000) / 60000)).padStart(2, "0");
-  const s = String(Math.floor((totalMs % 60000) / 1000)).padStart(2, "0");
-  const ms3 = String(totalMs % 1000).padStart(3, "0");
-  return `${h}:${m}:${s}`;
 }
 
 function run(cmd, args, opts = {}) {
@@ -274,57 +288,52 @@ async function getFlac(wavPath) {
 
 const MAX_RETRIES   = 5;
 const BASE_DELAY_MS = 5000;
+const API_TIMEOUT   = 120000; // 2 mins
 
 async function callApi(uploadInfo) {
   const buf = await fsp.readFile(uploadInfo.path);
   const apiStart = Date.now();
   const form = new FormData();
-  try {
-      form.append("file", buf, {
-      filename:    uploadInfo.filename,
-      contentType: uploadInfo.mime
-    });
-    form.append("model", model);
-    form.append("language", forceLanguage);
-    form.append("timestamp_granularities", "segment");
-    form.append("response_format", apiResponseFormat);
-    form.append("temperature", String(apiTemperature));
-    if (apiPrompt) form.append("prompt", apiPrompt);
-    let attempt = 0;
-    while (true) {
-      attempt ++;    
-      const response = await axios.post(
-        "https://api.mistral.ai/v1/audio/transcriptions", form,
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            ...form.getHeaders()
-          },
-          timeout: 90000 // 90 secs
+  form.append("file", buf, {
+    filename:    uploadInfo.filename,
+    contentType: uploadInfo.mime
+  });
+  form.append("model", model);
+  form.append("language", forceLanguage);
+  form.append("timestamp_granularities", "segment");
+  form.append("response_format", apiResponseFormat);
+  form.append("temperature", String(apiTemperature));
+  if (apiPrompt) form.append("prompt", apiPrompt);
+  let attempt = 0;
+  while (true) {
+    attempt ++;   
+    let response = {}; 
+    try {
+      response = await axios.post(
+        "https://api.mistral.ai/v1/audio/transcriptions", form, {
+            headers: {Authorization: `Bearer ${apiKey}`, ...form.getHeaders()},
+            timeout: API_TIMEOUT
         }
       );
-      // console.log(`API response received`, 
-      //             { status: response.status, data: response.data });
-      if (response.status == 200) {
-        response.data.delay = Date.now() - apiStart;
-        return response.data;
-      }
-      if(attempt > MAX_RETRIES) {
-        console.error(`[${ts()}] API error, status: ${
-                                 response.status}, max retries reached`);
-        process.exit(1);
-      }
-      console.error(`[${ts()}] API error, status: ${response.status}, retrying`);
-      if (attempt == 1) console.log(JSON.stringify(uploadInfo, null, 2));
-      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      await sleep(delay);
-      continue;
     }
-  }
-  catch (err) {
-    console.error(`API caught error: ${err.message}\n${
-                   JSON.stringify(uploadInfo, null, 2)}`);
-    process.exit(1);
+    catch(err) { 
+      response.status = err.message; 
+    }
+    if (response.status === 200) {
+      response.data.delay = Date.now() - apiStart;
+      return response.data;
+    }
+    if(attempt > MAX_RETRIES) {
+      console.error(`[${ts()}] API error: ${response.status
+                                           }\n FATAL: max retries reached`);
+      process.exit(1);
+    }
+    console.error(`[${ts()}] API error: ${response.status}, retrying`);
+    if (attempt == 1) console.log('chunk, size:', uploadInfo.size, 
+                                       '- file:', uploadInfo.filename);
+    const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+    await sleep(delay);
+    continue;
   }
 }
 
@@ -335,7 +344,7 @@ function processSegments(segments, chunkInfo) {
     if (segment.start === undefined || segment.end === undefined 
                                     || !segment.text?.trim()) {
       console.error(`Invalid segment (missing start/end/text), chunk ${
-                         chunkInfo.chunkindex }`);
+                         chunkInfo.chunkIndex }`);
       process.exit(1);
     }
     const start = chunkInfo.chunkStart + segment.start;
@@ -345,7 +354,6 @@ function processSegments(segments, chunkInfo) {
       text:  segment.text.trim(),
       chunk: chunkInfo
     };
-    // if(segment.text.includes("picturesque")) debugger;
     if (start < chunkInfo.trimStart || 
         end   > chunkInfo.trimEnd) continue;
     processedSegments.push(processedSegment);
@@ -353,31 +361,70 @@ function processSegments(segments, chunkInfo) {
   return processedSegments;
 }
 
+function toSrtTime(totalSec) {
+  const totalMs = Math.max(0, Math.round(totalSec * 1000));
+  const h = String(Math.floor(totalMs / 3600000)).padStart(2, "0");
+  const m = String(Math.floor((totalMs % 3600000) / 60000)).padStart(2, "0");
+  const s = String(Math.floor((totalMs % 60000) / 1000)).padStart(2, "0");
+  const ms3 = String(totalMs % 1000).padStart(3, "0");
+  return `${h}:${m}:${s},${ms3}`;
+}
+
 /* ---------------- SRT generation ---------------- */
-function generateSRT(segments, outputPath) {
+function writeSRT(segments, outputPath) {
   if (!segments || segments.length === 0) {
-    throw new Error("No segments to write");
+    console.error("No segments to write:", outputPath);
+    process.exit(1);
   }
-
-  let srtContent = "";
-  let index = 1;
-
+  let lastStart = -1;
+  let lastEnd   = -1;
+  let lastText  = null;
+  let firstSeg  = true;
+  let start;
+  let end;
+  let text;
+  let skipSeg;
   const sortedSegments = segments.sort((a, b) => a.start - b.start);
-
-  for (const seg of sortedSegments) {
-    if (!seg.text || !seg.text.trim()) continue;
-
+  const segOut = [];
+  for (const segment of sortedSegments) {
+    if(!firstSeg) {
+      if(!skipSeg) segOut.push({ start, end, text });
+      lastStart = start;
+      lastEnd   = end;
+      lastText  = text;
+    } // \b(\w+)\s*\.toFixed\(1\)
+    start    = segment.start;
+    end      = segment.end;
+    text     = segment.text.trim();
+    firstSeg = false;
+    skipSeg  = true;
+    if (text.length == 0) continue;
+    if((start > lastStart && start < lastEnd) ||
+       (end   > lastStart && end   < lastEnd)) {
+      if(text === lastText) continue;
+      console.log(`\n[${ts()}] Overlapping segments ...`);
+      console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`); 
+      console.log(`B ${vs(start)}, ${vs(end)}, "${text}"`);
+      if(text.length > lastText.length) {
+        console.log('Using A');
+        continue;
+      }
+      console.log('Using B');
+      segOut.pop();
+    }
+    skipSeg  = false;
+  }
+  let srtContent = "";
+  let index = 0;
+  for (const seg of segOut) {
     const startTime = toSrtTime(seg.start);
     const endTime   = toSrtTime(seg.end);
-
-    srtContent += `${index}\n`;
+    srtContent += `${++index}\n`;
     srtContent += `${startTime} --> ${endTime}\n`;
-    srtContent += `${seg.text.trim()}\n\n`;
-    index++;
+    srtContent += `${seg.text}\n\n`;
   }
-
   fs.writeFileSync(outputPath, srtContent, "utf8");
-  console.log(`[${ts()}] ${path.basename(outputPath)} written (${index - 1} captions)`);
+  console.log(`\n[${ts()}] Wrote: ${path.basename(outputPath)}`);
 }
 
 /* ---------------- Main processing function ---------------- */
@@ -410,57 +457,59 @@ async function processOneVideo(videoPath) {
         if (apiData.segments && apiData.segments.length > 0) {
           const processedSegments = processSegments(apiData.segments, chunkInfo);
           allSegments.push(...processedSegments);
-          console.log(`[${ts()}] Chunk ${
-            (chunkInfo.chunkIndex ).toString().padStart(3)}: ${
-            (chunkInfo.chunkStart).toString().padStart(4)}s ${
-            (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
-            Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ${
-            processedSegments.length.toString().padStart(3)} segments, api:${
-            Math.round(apiData.delay/1000).toString().padStart(3)}s`);
+          if(DUMP_ALL_SEGS)
+            console.log(`[${ts()}] Chunk ${
+              (chunkInfo.chunkIndex ).toString().padStart(3)}: ${
+              (chunkInfo.chunkStart).toString().padStart(4)}s ${
+              (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
+              Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ${
+              processedSegments.length.toString().padStart(3)} segments, api:${
+              Math.round(apiData.delay/1000).toString().padStart(3)}s`);
           continue;
         } 
         else {
           console.log(`[${ts()}] Chunk ${
-            (chunkInfo.chunkindex ).toString().padStart(3)}: ${
+            (chunkInfo.chunkIndex ).toString().padStart(3)}: ${
             (chunkInfo.chunkStart).toString().padStart(4)}s ${
             (chunkInfo.chunkEnd).toString().padStart(4)}s, Size: ${
             Math.round(uploadInfo.size / 1e6).toString().padStart(2)}Mb, ⚠️ no segments`);
           continue;
         }
       } catch (err) {
-        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.chunkindex }/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
+        console.log(`[${ts()}] ${path.basename(videoPath)} | Chunk ${chunkInfo.chunkIndex }/${chunks.length}: ${chunkInfo.chunkStart.toFixed(0)}s-${chunkInfo.chunkEnd.toFixed(0)}s ❌ ${err.message}`);
       }
     }
     if (allSegments.length === 0) {
       console.error("No transcription segments found");
       process.exit(1);
     }
-    let lastIdx       = -1;
-    let lastInOverlap = false;
-    for(const segment of allSegments) {
-      const chunkInfo = segment.chunk;
-      const inOverlap = segment.start < chunkInfo.overlapStart
-                     || segment.end   > chunkInfo.overlapEnd;
-      if (chunkInfo.chunkIndex != lastIdx) {
-        console.log(`\nChunk ${(chunkInfo.chunkIndex )}: ${
-          chunkInfo.chunkStart}  ${
-          chunkInfo.trimStart}  ${
-          chunkInfo.overlapStart}  ${
-          chunkInfo.overlapEnd}  ${
-          chunkInfo.trimEnd}  ${
-          chunkInfo.chunkEnd}`);
-        lastIdx = chunkInfo.chunkIndex;
+    if(DUMP_ALL_SEGS) {
+      let lastIdx       = -1;
+      let lastInOverlap = false;
+      for(const segment of allSegments) {
+        const chunkInfo = segment.chunk;
+        const inOverlap = segment.start < chunkInfo.overlapStart
+                      || segment.end   > chunkInfo.overlapEnd;
+        if (chunkInfo.chunkIndex != lastIdx) {
+          console.log(`\nChunk ${(chunkInfo.chunkIndex )}: ${
+            chunkInfo.chunkStart}  ${
+            chunkInfo.trimStart}  ${
+            chunkInfo.overlapStart}  ${
+            chunkInfo.overlapEnd}  ${
+            chunkInfo.trimEnd}  ${
+            chunkInfo.chunkEnd}`);
+          lastIdx = chunkInfo.chunkIndex;
+        }
+        if(inOverlap != lastInOverlap) console.log();
+        lastInOverlap = inOverlap;
+        console.log(`${vs(segment.start)} ${vs(segment.end)} ${segment.text}`);
       }
-      if(inOverlap != lastInOverlap) console.log();
-      lastInOverlap = inOverlap;
-      console.log(`${
-        segment.start.toFixed(1).padStart(6)} ${
-        segment.end.toFixed(1).padStart(6)}  ${
-        segment.text}`);
     }
+    const outputPath = getSrtPath(videoPath);
+    writeSRT(allSegments, outputPath);
   } catch (err) {
-    console.error(`[${ts()}] ❌ ${path.basename(videoPath)
-                                  } | Failed to process: ${err.message}`);
+    console.error(`[${ts()}] ❌ Failed to process: ${path.basename(videoPath)
+                                                     }, ${err.message}`);
     process.exit(1);
   }
 }
