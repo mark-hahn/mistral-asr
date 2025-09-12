@@ -354,9 +354,9 @@ function processSegments(segments, chunkInfo) {
       text:  segment.text.trim(),
       chunk: chunkInfo
     };
-    if (start < chunkInfo.trimStart || 
-        end   > chunkInfo.trimEnd) continue;
-    processedSegments.push(processedSegment);
+    if (start > chunkInfo.trimStart &&
+        end   < chunkInfo.trimEnd) 
+      processedSegments.push(processedSegment);
   }
   return processedSegments;
 }
@@ -373,46 +373,45 @@ function toSrtTime(totalSec) {
 /* ---------------- SRT generation ---------------- */
 function writeSRT(segments, outputPath) {
   if (!segments || segments.length === 0) {
-    console.error("No segments to write:", outputPath);
+    console.error("Video has no segments to write:", outputPath);
     process.exit(1);
   }
-  let lastStart = -1;
-  let lastEnd   = -1;
-  let lastText  = null;
-  let firstSeg  = true;
-  let start;
-  let end;
-  let text;
-  let skipSeg;
   const sortedSegments = segments.sort((a, b) => a.start - b.start);
+
+  let lastStart = +1e9;
+  let lastEnd   = -1e9;
+  let lastText  = null;
+  let skipSeg;
   const segOut = [];
   for (const segment of sortedSegments) {
-    if(!firstSeg) {
+    const start = segment.start;
+    const end   = segment.end;
+    const text  = segment.text.trim();
+    if(text.includes('Oh!')) debugger;
+    try {
+      skipSeg  = true;
+      if (text.length == 0) continue;
+      if((start >= lastStart && start <= lastEnd) ||
+         (end   >= lastStart && end   <= lastEnd)) {
+        if(text === lastText) continue;
+        console.log(`\n[${ts()}] Overlapping segments ...`);
+        console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`); 
+        console.log(`B ${vs(start)}, ${vs(end)}, "${text}"`);
+        if(text.length > lastText.length) {
+          console.log('Using A');
+          continue;
+        }
+        console.log('Using B');
+        segOut.pop();
+      }
+      skipSeg  = false;
+    }
+    finally {
       if(!skipSeg) segOut.push({ start, end, text });
       lastStart = start;
       lastEnd   = end;
       lastText  = text;
-    } // \b(\w+)\s*\.toFixed\(1\)
-    start    = segment.start;
-    end      = segment.end;
-    text     = segment.text.trim();
-    firstSeg = false;
-    skipSeg  = true;
-    if (text.length == 0) continue;
-    if((start > lastStart && start < lastEnd) ||
-       (end   > lastStart && end   < lastEnd)) {
-      if(text === lastText) continue;
-      console.log(`\n[${ts()}] Overlapping segments ...`);
-      console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`); 
-      console.log(`B ${vs(start)}, ${vs(end)}, "${text}"`);
-      if(text.length > lastText.length) {
-        console.log('Using A');
-        continue;
-      }
-      console.log('Using B');
-      segOut.pop();
     }
-    skipSeg  = false;
   }
   let srtContent = "";
   let index = 0;
