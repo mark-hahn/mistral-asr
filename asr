@@ -36,16 +36,23 @@ case "${arg1:-}" in
   *  ) subcmd=""; param="$arg1";;
 esac
 
-# Resolve PARAM to a path (abs if starts with / or ~; else under BASE_MEDIA)
 resolve_path() {
   local p="$1"
   if [[ -z "$p" ]]; then
-    printf "%s\n" "$PWD"
-  elif [[ "$p" = /* || "$p" = ~* ]]; then
+    printf '%s' "$PWD"
+  elif [[ "$p" = /* ]]; then
+    # absolute path
+    printf '%s' "$p"
+  elif [[ "$p" = ~* ]]; then
+    # ~ or ~user
     # shellcheck disable=SC2086
-    eval printf "%s\n" "$p"
+    printf '%s' "$(eval echo "$p")"
+  elif [[ "$p" == ./* || "$p" == ../* ]]; then
+    # explicitly CWD-relative
+    printf '%s' "$(realpath -m -- "$PWD/$p")"
   else
-    printf "%s\n" "$BASE_MEDIA/$p"
+    # bare name under BASE_MEDIA
+    printf '%s' "$BASE_MEDIA/$p"
   fi
 }
 
