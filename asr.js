@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+// --- asr.js portability header (injected) ---
+// Force temp files to /tmp regardless of environment
+try {
+  process.env.TMPDIR = "/tmp";
+  process.env.TMP = "/tmp";
+  process.env.TEMP = "/tmp";
+} catch (_) {}
+// -------------------------------------------
 
 // https://docs.mistral.ai/capabilities/audio/
 // https://console.mistral.ai/usage
@@ -8,14 +16,11 @@ const DUMP_ALL_SEGS = false;
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
-import os from "os";
 import {spawn} from "child_process";
 import {fileURLToPath} from "url";
 import {setTimeout as sleep} from "timers/promises";
 import axios from "axios";
 import FormData from "form-data";
-import {Mistral} from "@mistralai/mistralai";
-import util from "util";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
