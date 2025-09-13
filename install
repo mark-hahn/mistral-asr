@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Usage: sudo env NODE_BIN="$(command -v node)" NPM_BIN="$(command -v npm)" ./install
+set -euo pipefail
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "Please run with sudo:  sudo env NODE_BIN=\$(command -v node) NPM_BIN=\$(command -v npm) ./install" >&2
+  exit 1
+fi
+
+PROJECT_DIR="$(pwd)"
+PROJECT_JS="$PROJECT_DIR/asr.js"
+PROJECT_PKG="$PROJECT_DIR/package.json"
+LOCK_NPM="$PROJECT_DIR/package-lock.json"
+PROJECT_SECRETS="$PROJECT_DIR/secrets"
+
+PREFIX="/usr/local"
+BIN_DIR="$PREFIX/bin"
+LIB_DIR="$PREFIX/lib/asr"
+
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+NPM_BIN="${NPM_BIN:-$(command -v npm  || true)}"
+[[ -x "${NODE_BIN:-}" ]] || { echo "Missing required tool: node"; exit 1; }
+[[ -x "${NPM_BIN:-}"  ]] || { echo "Missing required tool: npm";  exit 1; }
+
+echo "==> Project: $PROJECT_DIR"
+[[ -f "$PROJECT_JS"  ]] || { echo "Missing $PROJECT_JS"  >&2; exit 1; }
+[[ -f "$PROJECT_PKG" ]] || { echo "Missing $PROJECT_PKG" >&2; exit 1; }
+
+echo "==> Removing previous install (if any)"
+rm -f  "$BIN_DIR/asr" || true
+rm -rf "$LIB_DIR"     || true
+
+echo "==> Creating $LIB_DIR"
+mkdir -p "$LIB_DIR" "$BIN_DIR"
+
+echo "==> Installing wrapper -> $BIN_DIR/asr"
+cp "$PROJECT_DIR/asr" "$BIN_DIR/asr"
+chmod 0755 "$BIN_DIR/asr"
+
+echo "==> Copying runtime -> $LIB_DIR"
+cp "$PROJECT_JS"  "$LIB_DIR/asr.js"
+cp "$PROJECT_PKG" "$LIB_DIR/package.json"
+[[ -f "$LOCK_NPM" ]] && cp "$LOCK_NPM" "$LIB_DIR/package-lock.json" || true
+
+# Secrets live only in runtime dir
+if [[ -d "$PROJECT_SECRETS" ]]; then
+  echo "==> Copying secrets/ -> $LIB_DIR/secrets"
+  mkdir -p "$LIB_DIR/secrets"
+  cp -a "$PROJECT_SECRETS/." "$LIB_DIR/secrets/"
+  [[ -f "$LIB_DIR/secrets/mistral-asr-key.txt" ]] && chmod 600 "$LIB_DIR/secrets/mistral-asr-key.txt" || true
+else
+  echo "==> No secrets/ directory found; skipping"
+fi
+
+# *** Make temps resolve to /tmp even if asr.js writes to lib tmp ***
+echo "==> Linking $LIB_DIR/tmp -> /tmp"
+rm -rf "$LIB_DIR/tmp"
+ln -s /tmp "$LIB_DIR/tmp"
+
+echo "==> Installing node_modules in $LIB_DIR"
+pushd "$LIB_DIR" >/dev/null
+export PATH="$(dirname "$NODE_BIN"):$PATH"
+export npm_config_unsafe_perm=true
+if [[ -f package-lock.json ]]; then
+  "$NPM_BIN" ci --omit=dev
+else
+  "$NPM_BIN" install --omit=dev
+fi
+popd >/dev/null
+
+# sanity check
+test -d "$LIB_DIR/node_modules/axios" || { echo "ERROR: axios not installed"; exit 1; }
+
+echo "==> Done."
+echo "Wrapper : $BIN_DIR/asr"
+echo "Runtime : $LIB_DIR/{asr.js,package.json,node_modules,secrets,tmp->/tmp}"
+echo
+echo "Test:  type -a asr && asr help"
+echo "Usage: cd /folder/with/videos && asr   (use: asr tail | asr kill)"
