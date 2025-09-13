@@ -217,9 +217,19 @@ async function extractAudio(inputVideo, outWav) {
       -c:a pcm_s16le out-gate.wav
 
 6) Add RNNoise:
-            ffmpeg -i in.wav -ac 1 -ar 16000 
-            -af "highpass=f=80,lowpass=f=8000,acompressor=threshold=0.003:ratio=3:attack=20:release=400,arnndn=m=rnnoise" 
-            -c:a pcm_s16le out-denoise.wav
+    ffmpeg -i in.wav -ac 1 -ar 16000 
+    -af "highpass=f=80,lowpass=f=8000,acompressor=threshold=0.003:ratio=3:attack=20:release=400,arnndn=m=./arnndn-models/std.rnnn" 
+    -c:a pcm_s16le out-denoise.wav
+
+    # A) arnndn with standard model
+    ffmpeg -i in.wav -ac 1 -ar 16000 -af "arnndn=m=./arnndn-models/std.rnnn" out-arnndn.wav
+    
+    # B) afftdn only
+    ffmpeg -i in.wav -ac 1 -ar 16000 -af "afftdn=nf=-25" out-afftdn.wav
+    
+    # C) baseline (no denoise)
+    ffmpeg -i in.wav -ac 1 -ar 16000 -c:a pcm_s16le out-baseline.wav
+                        
 */
 
 let haveDumpedFFmpeg = false;
@@ -241,8 +251,8 @@ async function preprocessAudio(inputWav, outputWav) {
   );
   let audioFilter = filters.join(',');
 
-  audioFilter = "highpass=f=80,lowpass=f=8000";
-  
+  audioFilter = "arnndn=m=./arnndn-models/std.rnnn";
+
   if(!haveDumpedFFmpeg) console.log({audioFilter});
   haveDumpedFFmpeg = true;
 
@@ -336,20 +346,20 @@ const API_TIMEOUT   = 120000; // 2 mins
 async function callApi(uploadInfo) {
   const buf = await fsp.readFile(uploadInfo.path);
   const apiStart = Date.now();
-  const form = new FormData();
-  form.append("file", buf, {
-    filename:    uploadInfo.filename,
-    contentType: uploadInfo.mime
-  });
-  form.append("model", model);
-  form.append("language", forceLanguage);
-  form.append("timestamp_granularities", "segment");
-  form.append("response_format", apiResponseFormat);
-  form.append("temperature", String(apiTemperature));
-  if (apiPrompt) form.append("prompt", apiPrompt);
   let attempt = 0;
   while (true) {
-    attempt ++;   
+    const form = new FormData();
+    form.append("file", buf, {
+      filename:    uploadInfo.filename,
+      contentType: uploadInfo.mime
+    });
+    form.append("model", model);
+    form.append("language", forceLanguage);
+    form.append("timestamp_granularities", "segment");
+    form.append("response_format", apiResponseFormat);
+    form.append("temperature", String(apiTemperature));
+    if (apiPrompt) form.append("prompt", apiPrompt);
+      attempt ++;   
     let response = {}; 
     try {
       response = await axios.post(
@@ -436,14 +446,12 @@ function writeSRT(segments, outputPath) {
     const start = segment.start;
     const end   = segment.end;
     const text  = segment.text.trim();
-    // if(text.includes('Oh!')) debugger;
     try {
       skipSeg  = true;
+
       if (text.length == 0) continue;
-      // if(start == lastEnd) {
-      //   segOut[segOut.length-1] += (' ' + text);
-      //   continue;
-      // }
+      if(text == lastText)  continue;
+      
       if((start > lastStart && start < lastEnd) ||
          (end   > lastStart && end   < lastEnd)) {
         if(text === lastText) continue;
