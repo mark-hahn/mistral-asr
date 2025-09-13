@@ -1,188 +1,197 @@
 #!/usr/bin/env bash
-# asr — batch ASR runner (videos in a folder; temps=/tmp; log=asr.log; outputs *.srt)
+# asr — thin wrapper: run asr.js ONCE for a folder or a single file
 # Usage:
-#   asr                     # run in CWD
-#   asr SEASON/FOLDER       # run in /mnt/media/tv/SEASON/FOLDER
-#   asr tail [SEASON/FOLDER]
-#   asr kill [SEASON/FOLDER]
-#
-# Examples:
-#   asr "Ideal/Season 7"
-#   asr tail "Ideal/Season 7"
-#   asr kill "Ideal/Season 7"
+#   asr                                # run in CWD (folder mode)
+#   asr PARAM                          # run /mnt/media/tv/PARAM (dir or file, or absolute path)
+#   asr tail   [PARAM]
+#   asr kill   [PARAM]
+#   asr status [PARAM]
+#   asr last   [PARAM]                 # reads last exit code from asr.log
 #
 # Notes:
-# - Runs node from /usr/local/lib/asr so node_modules and ./secrets resolve there.
-# - Temps go to /tmp (ASR_TMPDIR). Only asr.log and *.srt appear in TARGET_DIR.
-# - Set ASR_PER_FILE=1 to run per-file instead of per-folder.
+# - Single shared files per target dir: asr.log, asr.pid (NO asr.exit)
+# - Node runs from /usr/local/lib/asr; temps in /tmp
 
 set -euo pipefail
 
 BASE_MEDIA="/mnt/media/tv"
 RUNTIME_DIR="/usr/local/lib/asr"
+ASR_JS_PATH="$RUNTIME_DIR/asr.js"
 
-# Make node resolvable even in non-interactive shells
+# Robust PATH
 PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 NODE_BIN="$(command -v node || true)"; [[ -x "$NODE_BIN" ]] || NODE_BIN="node"
 
-# Environment for runtime
+# Runtime env
 TMPDIR="/tmp"; export TMPDIR TMP="$TMPDIR" TEMP="$TMPDIR"
 ASR_TMPDIR="/tmp/asr-$PPID"; export ASR_TMPDIR
 ASR_SECRETS_DIR="$RUNTIME_DIR/secrets"; export ASR_SECRETS_DIR
 
-# --- argument parsing -------------------------------------------------------
-subcmd=""
-param=""
-arg1="${1:-}"
-arg2="${2:-}"
-
+# ---------------- args ----------------
+subcmd=""; param=""
+arg1="${1:-}"; arg2="${2:-}"
 case "${arg1:-}" in
-  tail|kill|help|-h|--help)
-    subcmd="$arg1"
-    param="$arg2"
-    ;;
-  "")
-    subcmd=""   # main run in CWD
-    ;;
-  *)
-    # Treat first arg as PARAM (relative to BASE_MEDIA)
-    subcmd=""
-    param="$arg1"
-    ;;
+  tail|kill|status|last|help|-h|--help) subcmd="$arg1"; param="${arg2:-}";;
+  "" ) subcmd="";;   # run folder-mode in CWD
+  *  ) subcmd=""; param="$arg1";;
 esac
 
-# Determine TARGET_DIR based on optional PARAM
-if [[ -n "${param:-}" ]]; then
-  # normalize possible leading slash
-  param="${param#/}"
-  TARGET_DIR="$BASE_MEDIA/$param"
-else
-  TARGET_DIR="$PWD"
+# Resolve PARAM to a path (abs if starts with / or ~; else under BASE_MEDIA)
+resolve_path() {
+  local p="$1"
+  if [[ -z "$p" ]]; then
+    printf "%s\n" "$PWD"
+  elif [[ "$p" = /* || "$p" = ~* ]]; then
+    # shellcheck disable=SC2086
+    eval printf "%s\n" "$p"
+  else
+    printf "%s\n" "$BASE_MEDIA/$p"
+  fi
+}
+
+TARGET_PATH="$(resolve_path "${param:-}")"
+
+# Determine mode: folder vs file
+MODE="dir"
+TARGET_DIR="$TARGET_PATH"
+INPUT_PATH="$TARGET_PATH"
+
+if [[ -e "$TARGET_PATH" && ! -d "$TARGET_PATH" ]]; then
+  MODE="file"
+  TARGET_DIR="$(dirname "$TARGET_PATH")"
+  INPUT_PATH="$TARGET_PATH"
 fi
+
+# Unified filenames (no per-file variants)
+LOG_FILE="$TARGET_DIR/asr.log"
+PID_FILE="$TARGET_DIR/asr.pid"
 
 usage() {
   cat <<EOF
-asr — batch ASR for videos in a folder
+asr — run asr.js once on a folder or single file
 
 Usage:
-  asr                     Process all video files in the current directory
-  asr PARAM               Process in /mnt/media/tv/PARAM
-  asr tail [PARAM]        Tail the log in TARGET_DIR
-  asr kill [PARAM]        Kill the current run in TARGET_DIR
-  asr help                Show this help
-
-PARAM examples:
-  "Ideal/Season 7"  -> TARGET_DIR=/mnt/media/tv/Ideal/Season 7
+  asr                      Run in current directory (folder mode)
+  asr PARAM                Run /mnt/media/tv/PARAM (dir or file). Absolute paths allowed.
+  asr tail [PARAM]         Tail log in target dir
+  asr kill [PARAM]         Kill current run in target dir
+  asr status [PARAM]       Show running status in target dir
+  asr last [PARAM]         Show last exit code (parsed from asr.log)
 
 Notes:
-  - Temps: /tmp (ASR_TMPDIR=$ASR_TMPDIR)
-  - Runtime cwd: $RUNTIME_DIR (so "./secrets" and node_modules resolve there)
-  - Outputs: *.srt and asr.log are written in TARGET_DIR
-  - Set ASR_PER_FILE=1 to run per-file instead of per-folder
+  - Log:  $LOG_FILE
+  - PID:  $PID_FILE
+  - Concurrency: one run per target dir (shared PID/log).
 EOF
 }
 
-# Validate target dir for commands that need it
-need_dir_check() {
-  case "$1" in tail|kill|"") return 0 ;; *) return 0 ;; esac
+start_tail() { [[ -f "$LOG_FILE" ]] || { echo "No log at $LOG_FILE"; exit 1; }; exec tail -fn 200 "$LOG_FILE"; }
+
+is_running() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid; pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-if need_dir_check "$subcmd"; then
-  if [[ ! -d "$TARGET_DIR" ]]; then
-    echo "ERROR: TARGET_DIR not found: $TARGET_DIR" >&2
-    exit 1
-  fi
-fi
-
-LOG_FILE="$TARGET_DIR/asr.log"
-PID_FILE="$TARGET_DIR/.asr.pid"
-
-start_tail() {
-  [[ -f "$LOG_FILE" ]] || { echo "No log at $LOG_FILE"; exit 1; }
-  exec tail -fn 200 "$LOG_FILE"
-}
+cleanup_stale_pid() { if [[ -f "$PID_FILE" ]] && ! is_running; then rm -f "$PID_FILE"; fi; }
 
 kill_run() {
-  local pid=""
-  [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  local pid=""; [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -z "${pid:-}" ]] || ! kill -0 "$pid" 2>/dev/null; then
-    echo "No asr running"
-    exit 0
+    echo "No asr running"; rm -f "$PID_FILE"; exit 0
   fi
   echo "SIGTERM to process-group $pid"; kill -TERM "-$pid" 2>/dev/null || true; sleep 1
   kill -0 "$pid" 2>/dev/null && { echo "SIGKILL to process-group $pid"; kill -KILL "-$pid" 2>/dev/null || true; }
   rm -f "$PID_FILE"; echo "Stopped."
 }
 
-resolve_asr_js() {
-  # Prefer installed runtime script
-  local candidates=("$RUNTIME_DIR/asr.js" "$TARGET_DIR/asr.js" "$PWD/asr.js")
-  for p in "${candidates[@]}"; do [[ -f "$p" ]] && { echo "$p"; return 0; }; done
-  return 1
+last_exit_from_log() {
+  [[ -f "$LOG_FILE" ]] || { echo "no log in: $TARGET_DIR"; return 1; }
+  # Find the last “[asr] EXIT N” and print N; otherwise, say none recorded
+  local code
+  code="$(awk '/^\[asr\] EXIT [0-9]+$/ {c=$3} END{if (c!="") print c;}' "$LOG_FILE" || true)"
+  if [[ -n "${code:-}" ]]; then
+    echo "last exit: $code in: $TARGET_DIR"
+  else
+    echo "no previous exit code recorded in: $TARGET_DIR"
+    return 1
+  fi
 }
 
-# --- dispatch subcommands ---------------------------------------------------
+# --------- subcommands ----------
 case "$subcmd" in
   help|-h|--help) usage; exit 0 ;;
-  tail) start_tail ;;
-  kill) kill_run; exit 0 ;;
+  tail)
+    [[ -e "$TARGET_PATH" || -d "$TARGET_DIR" ]] || { echo "ERROR: target not found: $TARGET_PATH"; exit 1; }
+    start_tail
+    ;;
+  kill)
+    [[ -e "$TARGET_PATH" || -d "$TARGET_DIR" ]] || { echo "ERROR: target not found: $TARGET_PATH"; exit 1; }
+    kill_run; exit 0
+    ;;
+  status)
+    [[ -e "$TARGET_PATH" || -d "$TARGET_DIR" ]] || { echo "ERROR: target not found: $TARGET_PATH"; exit 1; }
+    if is_running; then
+      echo "asr is running (PID $(cat "$PID_FILE")) in: $TARGET_DIR"
+    else
+      echo "asr is NOT running in: $TARGET_DIR"
+      [[ -f "$PID_FILE" ]] && echo "(stale PID file present: $PID_FILE)"
+    fi
+    exit 0
+    ;;
+  last)
+    [[ -e "$TARGET_PATH" || -d "$TARGET_DIR" ]] || { echo "ERROR: target not found: $TARGET_PATH"; exit 1; }
+    last_exit_from_log; exit $?
+    ;;
 esac
 
-# --- main run ---------------------------------------------------------------
-ASR_JS="$(resolve_asr_js || true)"
-[[ -f "${ASR_JS:-}" ]] || { echo "ERROR: asr.js not found" >&2; exit 1; }
+# --------- main run ----------
+[[ -f "$ASR_JS_PATH" ]] || { echo "ERROR: asr.js not found at $ASR_JS_PATH"; exit 1; }
+[[ -e "$TARGET_PATH" || -d "$TARGET_DIR" ]] || { echo "ERROR: target not found: $TARGET_PATH"; exit 1; }
 
-# Discover inputs in TARGET_DIR (for logging only)
-mapfile -t FILES < <(find "$TARGET_DIR" -maxdepth 1 -type f \( \
-  -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.avi' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.m4v' -o -iname '*.mpg' -o -iname '*.mpeg' -o -iname '*.ts' \
-\) | sort -V)
+cleanup_stale_pid
+if is_running; then
+  echo "asr already running in: $TARGET_DIR (PID $(cat "$PID_FILE"))"
+  echo "Use: asr tail \"$param\"  |  asr kill \"$param\""
+  exit 1
+fi
 
-echo "Scan dir: $TARGET_DIR"
-printf 'Candidate: %s\n' "${FILES[@]:-}" || true
-[[ ${#FILES[@]} -gt 0 ]] || { echo "No input video files found in: $TARGET_DIR" >&2; exit 1; }
-
-echo "Found ${#FILES[@]} input file(s)"
+echo "Mode: $MODE"
+echo "Input: $INPUT_PATH"
+echo "Target dir: $TARGET_DIR"
 echo "Writing log to: $LOG_FILE"
 echo "Using temp dir: $TMPDIR (ASR_TMPDIR=$ASR_TMPDIR)"
-echo "asr.js: $ASR_JS"
+echo "asr.js: $ASR_JS_PATH"
 
-# Launch in its own session; run node from RUNTIME_DIR so ./secrets & node_modules resolve
+trap 'rm -f "$PID_FILE" >/dev/null 2>&1 || true' EXIT
+
+# Export values for subshell
+export ASR_MODE="$MODE"
+export ASR_INPUT="$INPUT_PATH"
+export ASR_NODE_BIN="$NODE_BIN"
+export ASR_JS_ENTRY="$ASR_JS_PATH"
+
 export ASR_PID_FILE="$PID_FILE"
 export ORIGINAL_PWD="$TARGET_DIR"
 
-if [[ "${ASR_PER_FILE:-0}" == "1" ]]; then
-  { setsid bash -c '
-      set -euo pipefail
-      echo $$ > "$ASR_PID_FILE"
-      export TMPDIR="/tmp" TMP="/tmp" TEMP="/tmp"
-      export ASR_TMPDIR ASR_SECRETS_DIR ORIGINAL_PWD
-      asr_js="$1"; shift
-      total="$#"; i=0
-      for f in "$@"; do
-        i=$((i+1))
-        echo "[asr] ($i/$total) Starting: $f"
-        cd "'"$RUNTIME_DIR"'"
-        "'"$NODE_BIN"'" "$asr_js" --input "$f" 2>&1
-        echo "[asr] ($i/$total) Finished: $f"
-      done
-    ' asr-batch "$ASR_JS" "${FILES[@]}" 2>&1 | tee -a "$LOG_FILE"; } &
-else
-  { setsid bash -c '
-      set -euo pipefail
-      echo $$ > "$ASR_PID_FILE"
-      export TMPDIR="/tmp" TMP="/tmp" TEMP="/tmp"
-      export ASR_TMPDIR ASR_SECRETS_DIR ORIGINAL_PWD
-      asr_js="$1"; shift
-      echo "[asr] (folder) Starting: $ORIGINAL_PWD"
-      cd "'"$RUNTIME_DIR"'"
-      "'"$NODE_BIN"'" "$asr_js" --input "$ORIGINAL_PWD" 2>&1
-      echo "[asr] (folder) Finished: $ORIGINAL_PWD"
-    ' asr-batch "$ASR_JS" 2>&1 | tee -a "$LOG_FILE"; } &
-fi
+# Run node from runtime dir; pass INPUT_PATH (file or dir) to asr.js
+{ set -o pipefail; setsid bash -c '
+    set -euo pipefail
+    echo $$ > "$ASR_PID_FILE"
+    export TMPDIR="/tmp" TMP="/tmp" TEMP="/tmp"
+    export ASR_TMPDIR ASR_SECRETS_DIR ORIGINAL_PWD
+    cd "'"$RUNTIME_DIR"'"
+    echo "[asr] (start) $ASR_MODE: $ASR_INPUT"
+    exec "$ASR_NODE_BIN" "$ASR_JS_ENTRY" --input "$ASR_INPUT"
+  ' asr-batch 2>&1 | tee -a "$LOG_FILE"; } &
 
 runner_pid=$!
 echo "$runner_pid" > "$PID_FILE"
 echo "Runner PID: $(cat "$PID_FILE") (PID file: $PID_FILE)"
-echo "Tip: asr tail [PARAM]  |  asr kill [PARAM]"
+echo "Tip: asr tail [PARAM]  |  asr kill [PARAM]  |  asr last [PARAM]"
+
 wait "$runner_pid"
-exit $?
+status=$?
+echo "[asr] EXIT $status" | tee -a "$LOG_FILE"
+rm -f "$PID_FILE"
+exit "$status"

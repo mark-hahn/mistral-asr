@@ -45,14 +45,14 @@ function getNum(name, dflt) {
 }
 // 120s -> 5 Mb flac
 const chunkSec =              getNum("--chunk-sec",  120);
-const trimSec =               getNum("--trim-sec",    20);
-const overlapSec =            getNum("--overlap-sec", 10);
+const trimSec =               getNum("--trim-sec",    3);
+const overlapSec =            getNum("--overlap-sec", 3);
 const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
 const minChunkSec =           trimSec + overlapSec + trimSec;
 const audioQuality =          flagsKVP.get("--audio-quality") || "max";
 const enablePreprocessing =  !switches.has("--no-preprocess");
 const enableNoiseReduction = !switches.has("--no-denoise");
-const testMins =              getNum("--test-mins", 0);
+const testMins =              getNum("--test-mins", 2);
 const apiTemperature =        getNum("--temperature", 0);
 const apiResponseFormat =     flagsKVP.get("--response-format") || "verbose_json";
 const apiPrompt =             flagsKVP.get("--prompt") || null;

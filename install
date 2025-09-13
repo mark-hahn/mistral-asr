@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Usage: sudo env NODE_BIN="$(command -v node)" NPM_BIN="$(command -v npm)" ./install
 set -euo pipefail
+
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Please run with sudo:  sudo env NODE_BIN=\$(command -v node) NPM_BIN=\$(command -v npm) ./install" >&2
   exit 1
@@ -24,6 +25,7 @@ NPM_BIN="${NPM_BIN:-$(command -v npm  || true)}"
 echo "==> Project: $PROJECT_DIR"
 [[ -f "$PROJECT_JS"  ]] || { echo "Missing $PROJECT_JS"  >&2; exit 1; }
 [[ -f "$PROJECT_PKG" ]] || { echo "Missing $PROJECT_PKG" >&2; exit 1; }
+[[ -f "$PROJECT_DIR/asr" ]] || { echo "Missing wrapper file: $PROJECT_DIR/asr" >&2; exit 1; }
 
 echo "==> Removing previous install (if any)"
 rm -f  "$BIN_DIR/asr" || true
@@ -41,7 +43,7 @@ cp "$PROJECT_JS"  "$LIB_DIR/asr.js"
 cp "$PROJECT_PKG" "$LIB_DIR/package.json"
 [[ -f "$LOCK_NPM" ]] && cp "$LOCK_NPM" "$LIB_DIR/package-lock.json" || true
 
-# Secrets live only in runtime dir
+# Secrets live only in the runtime dir
 if [[ -d "$PROJECT_SECRETS" ]]; then
   echo "==> Copying secrets/ -> $LIB_DIR/secrets"
   mkdir -p "$LIB_DIR/secrets"
@@ -51,13 +53,14 @@ else
   echo "==> No secrets/ directory found; skipping"
 fi
 
-# *** Make temps resolve to /tmp even if asr.js writes to lib tmp ***
+# Ensure 'tmp' resolves to /tmp even if asr.js references $LIB_DIR/tmp
 echo "==> Linking $LIB_DIR/tmp -> /tmp"
 rm -rf "$LIB_DIR/tmp"
 ln -s /tmp "$LIB_DIR/tmp"
 
 echo "==> Installing node_modules in $LIB_DIR"
 pushd "$LIB_DIR" >/dev/null
+# Make sure npm's #!/usr/bin/env node finds node when running as root
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 export npm_config_unsafe_perm=true
 if [[ -f package-lock.json ]]; then
@@ -67,12 +70,15 @@ else
 fi
 popd >/dev/null
 
-# sanity check
-test -d "$LIB_DIR/node_modules/axios" || { echo "ERROR: axios not installed"; exit 1; }
+# sanity check: ensure axios present (adjust if you add/remove deps)
+if [[ ! -d "$LIB_DIR/node_modules/axios" ]]; then
+  echo "ERROR: axios not installed at $LIB_DIR/node_modules/axios" >&2
+  exit 1
+fi
 
 echo "==> Done."
 echo "Wrapper : $BIN_DIR/asr"
 echo "Runtime : $LIB_DIR/{asr.js,package.json,node_modules,secrets,tmp->/tmp}"
 echo
 echo "Test:  type -a asr && asr help"
-echo "Usage: cd /folder/with/videos && asr   (use: asr tail | asr kill)"
+echo "Usage: asr \"Ideal/Season 7\"   |   asr tail \"Ideal/Season 7\"   |   asr kill \"Ideal/Season 7\"   |   asr status \"Ideal/Season 7\""
