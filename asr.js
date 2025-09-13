@@ -251,7 +251,7 @@ async function preprocessAudio(inputWav, outputWav) {
   );
   let audioFilter = filters.join(',');
 
-  audioFilter = "arnndn=m=./arnndn-models/std.rnnn";
+  audioFilter = "highpass=f=80,lowpass=f=8000,dynaudnorm=f=150:g=3:m=3:s=8";
 
   if(!haveDumpedFFmpeg) console.log({audioFilter});
   haveDumpedFFmpeg = true;
