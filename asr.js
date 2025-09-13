@@ -185,14 +185,51 @@ async function extractAudio(inputVideo, outWav) {
   await run("ffmpeg", args);
 }
 
+/*
+  filters that change energy floor, spectral content, and dynamic range 
+  are what most ASR/VADs use to decide “speech vs. noise.”
+
+   agate=threshold=0.001:ratio=2:attack=10:release=100"
+
+1) agate (noise gate) — biggest lever on VAD
+    Why: Directly alters the noise floor and tail of words; 
+         too aggressive makes VAD think speech is silence.
+    Sweep: threshold: 0.0005 → 0.001 → 0.003 → 0.01 (linear amp; 
+           ≈ -66 → -60 → -50.5 → -40 dBFS)  ratio: 2 → 4 → 8
+    attack/release: attack=5–20, release=80–300 ms 
+          (short attack/release can chop syllables, confusing VAD)
+    Baseline on/off test: run once without agate, once with your chosen settings.
+
+0) Baseline:  ffmpeg -i in.wav -ac 1 -ar 16000 -c:a pcm_s16le out-baseline.wav
+
+2) Bandlimit only: 
+     ffmpeg -i in.wav -ac 1 -ar 16000 -af "highpass=f=80,lowpass=f=8000" 
+            -c:a pcm_s16le out-bandlimit.wav
+
+3) + Gentle compression:
+     ffmpeg -i in.wav -ac 1 -ar 16000 
+            -af "highpass=f=80,lowpass=f=8000,acompressor=threshold=0.003:ratio=3:attack=20:release=400" 
+           -c:a pcm_s16le out-comp.wav
+
+4) + Mild gate:
+      ffmpeg -i in.wav -ac 1 -ar 16000 -
+      af "highpass=f=80,lowpass=f=8000,acompressor=threshold=0.003:ratio=3:attack=20:release=400,agate=threshold=0.001:ratio=2:attack=10:release=120" 
+      -c:a pcm_s16le out-gate.wav
+
+6) Add RNNoise:
+            ffmpeg -i in.wav -ac 1 -ar 16000 
+            -af "highpass=f=80,lowpass=f=8000,acompressor=threshold=0.003:ratio=3:attack=20:release=400,arnndn=m=rnnoise" 
+            -c:a pcm_s16le out-denoise.wav
+*/
+
+let haveDumpedFFmpeg = false;
+
 async function preprocessAudio(inputWav, outputWav) {
   const filters = [];
   if (enableNoiseReduction) {
     filters.push(
       "highpass=f=80",
       "lowpass=f=8000",
-      // acompressor=threshold=0.003 (0-1) means volume reduced to 1/ratio
-      // threshold too low?
       "acompressor=threshold=0.003:ratio=3:attack=30:release=1000",
       "agate=threshold=0.001:ratio=2:attack=10:release=100"
     );
@@ -202,7 +239,13 @@ async function preprocessAudio(inputWav, outputWav) {
     "equalizer=f=3000:width_type=h:width=1000:g=1",
     "loudnorm=I=-16:TP=-1.5:LRA=11"
   );
-  const audioFilter = filters.join(',');
+  let audioFilter = filters.join(',');
+
+  audioFilter = "highpass=f=80,lowpass=f=8000";
+  
+  if(!haveDumpedFFmpeg) console.log({audioFilter});
+  haveDumpedFFmpeg = true;
+
   await run("ffmpeg", [
     "-y", "-i", inputWav,
     "-af", audioFilter,
@@ -336,10 +379,10 @@ async function callApi(uploadInfo) {
     continue;
   }
 }
-
 function processSegments(segments, chunkInfo) {
   if (!segments || segments.length === 0) return [];
   const processedSegments = [];
+  console.log();
   for (const segment of segments) {
     if (segment.start === undefined || segment.end === undefined 
                                     || !segment.text?.trim()) {
@@ -349,6 +392,10 @@ function processSegments(segments, chunkInfo) {
     }
     const start = chunkInfo.chunkStart + segment.start;
     const end   = chunkInfo.chunkStart + segment.end;
+
+    console.log(`RAW: ${chunkInfo.chunkIndex}, ${
+                     vs(start)}, ${vs(end)}, "${segment.text.trim()}"`);
+
     const processedSegment = {
       start, end,
       text:  segment.text.trim(),
@@ -358,6 +405,8 @@ function processSegments(segments, chunkInfo) {
         end   < chunkInfo.trimEnd) 
       processedSegments.push(processedSegment);
   }
+  // console.log(JSON.stringify(processedSegments, null, 2));
+  console.log();
   return processedSegments;
 }
 
@@ -457,7 +506,6 @@ async function processOneVideo(videoPath) {
       try {
         const uploadInfo = await getFlac(chunkInfo.wavPath);
         const apiData    = await callApi(uploadInfo);
-        console.log(JSON.stringify(apiData, null, 2));
         if (apiData.segments && apiData.segments.length > 0) {
           const processedSegments = processSegments(apiData.segments, chunkInfo);
           allSegments.push(...processedSegments);
@@ -522,17 +570,19 @@ async function processOneVideo(videoPath) {
 /* ---------------- Main execution ---------------- */
 async function main() {
   console.log(`\nConfiguration:`);
-  console.log(`   Audio Quality: ${audioQuality} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
-  console.log(`   Chunk Duration: ${chunkSec}s`);
-  console.log(`   Preprocessing: ${enablePreprocessing}`);
-  console.log(`   Noise Reduction: ${enableNoiseReduction}`);
-  console.log(`   Test Mode: ${testMins > 0 ? `${testMins} minutes` : 'OFF'}`);
-  console.log(`   API Model: ${model}`);
-  console.log(`   API Language: ${forceLanguage}`);
-  console.log(`   API Temperature: ${apiTemperature}`);
-  console.log(`   API Response Format: ${apiResponseFormat}`);
-  console.log(`   API Prompt: ${apiPrompt || 'None'}`);
-  console.log(`   File Size Limit: ${(fileLimit / 1024 / 1024).toFixed(1)}MB`);
+  console.log(`   Test Mode:        ${testMins > 0 ? `${testMins} minutes` : 'OFF'}`);
+  console.log(`   Chunk Duration:   ${chunkSec}s`);
+  console.log(`   Trim Duration:    ${trimSec}s`);
+  console.log(`   Overlap Duration: ${overlapSec}s`);
+  console.log(`   Audio Quality:    ${audioQuality} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
+  console.log(`   Preprocessing:    ${enablePreprocessing}`);
+  console.log(`   Noise Reduction:  ${enableNoiseReduction}`);
+  console.log(`   API Model:        ${model}`);
+  console.log(`   API Language:     ${forceLanguage}`);
+  console.log(`   API Temperature:  ${apiTemperature}`);
+  console.log(`   API Response:     ${apiResponseFormat}`);
+  console.log(`   API Prompt:       ${apiPrompt || 'None'}`);
+  console.log(`   File Size Limit:  ${(fileLimit / 1024 / 1024).toFixed(1)}MB`);
   console.log();
 
   try {
