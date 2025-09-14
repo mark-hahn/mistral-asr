@@ -41,11 +41,11 @@ function getNum(name, dflt) {
   return dflt;
 }
 // 120s -> 5 Mb flac
-const chunkSec =              getNum("--chunk-sec",    120);
-const trimSec =               getNum("--trim-sec",       3);
-const overlapSec =            getNum("--overlap-sec",    3);
-const timeMatchMgn =          getNum("--time-match-mgn", 0.5);
-const testMins =              getNum("--test-mins",      0);
+const chunkSec =              getNum("--chunk-sec",      120);
+const trimSec =               getNum("--trim-sec",         3);
+const overlapSec =            getNum("--overlap-sec",      3);
+const timeMatchMgn =          getNum("--time-match-mgn", 0.3);
+const testMins =              getNum("--test-mins",        0);
 const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
 const minChunkSec =           trimSec + overlapSec + trimSec;
 const audioQuality =          flagsKVP.get("--audio-quality") || "max";
@@ -453,10 +453,9 @@ function writeSRT(segments, outputPath) {
     try {
       skipSeg  = true;
       if (text.length == 0) continue;
-      const lastCenter = (lastStart + lastEnd) / 2;
-      const center     = (start + end) / 2;
-      if(Math.abs(center - lastCenter) < timeMatchMgn) {
-        if(text == lastText)  continue;
+      const leftMatch  = Math.abs(start - lastStart) < timeMatchMgn;
+      const rightMatch = Math.abs(end   - lastEnd  ) < timeMatchMgn;
+      if(leftMatch || rightMatch) {
         hadDuplicate = true;
         if(text === lastText) continue;
         console.log(`\n[${ts()}] Overlapping segments ...`);

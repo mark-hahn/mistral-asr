@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # asr — thin wrapper: run asr.js ONCE for a folder or a single file
-# Options (passed through to asr.js) must come BEFORE the target path.
 # Usage:
-#   asr [opts...]                      # run in CWD (folder mode)
-#   asr [opts...] PARAM                # run PARAM (dir or file; abs, ~, ./, ../, or BASE_MEDIA/name)
+#   asr [opts...]                 # run in CWD (folder mode)
+#   asr [opts...] PARAM           # run PARAM (dir or file; abs, ~, ./, ../, or BASE_MEDIA/name)
 #   asr tail   [PARAM]
 #   asr kill   [PARAM]
 #   asr status [PARAM]
-#   asr last   [PARAM]
-#   asr log    [PARAM]                 # prints log path
+#   asr last   [PARAM]            # reads last exit code from asr.log
+#   asr log    [PARAM]            # prints the log path
 #
 # Notes:
-# - Shared files per target dir: asr.log, asr.pid (exit code is printed into asr.log)
-# - Node runs from /usr/local/lib/asr; temps in /tmp; secrets there too.
+# - Shared files per target dir: asr.log, asr.pid (exit code logged as "[asr] EXIT N")
+# - Node executes from /usr/local/lib/asr so node_modules & secrets resolve there
+# - Temps in /tmp via ASR_TMPDIR
+# - Safe to close the launching terminal or press Ctrl-C; run continues in background
 
 set -euo pipefail
 
@@ -20,7 +21,7 @@ BASE_MEDIA="/mnt/media/tv"
 RUNTIME_DIR="/usr/local/lib/asr"
 ASR_JS_PATH="$RUNTIME_DIR/asr.js"
 
-# Robust PATH
+# Robust PATH for non-interactive shells
 PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 NODE_BIN="$(command -v node || true)"; [[ -x "$NODE_BIN" ]] || NODE_BIN="node"
 
@@ -86,8 +87,7 @@ Usage:
 
 Examples:
   asr --test-mins=10 "Ideal/Season 7/ideal.s07e01.dvdrip.xvid-haggis.avi"
-  asr --test-mins=10 /mnt/media/archive/dev/apps/mistral-asr/test/Karen\\ Pirie\\ S01E01\\ 1080p\\ ITV\\ WEB-DL\\ AAC\\ 2.0\\ H.264-WhiskeyJack.mkv
-  asr tail "Ideal/Season 7"
+  asr --test-mins=10 "/absolute/path/Some Video.mkv"
 Notes:
   - Place options BEFORE the target path.
   - If your path has spaces, quote it.
@@ -103,11 +103,10 @@ if (( $# >= 1 )); then
   case "$1" in
     tail|kill|status|last|log|help|-h|--help)
       subcmd="$1"; shift
-      # For utility subcommands, we do not parse options; remaining single arg is the target (optional)
-      param="${1-}"
+      param="${1-}"   # optional target for utility subcommands
       ;;
     *)
-      # Main run: collect leading --options for asr.js until the first non-option (target)
+      # Main run: collect leading --options for asr.js until first non-option (target)
       while (( $# )); do
         case "$1" in
           --) shift; break ;;                         # explicit end of options; next token is target
@@ -115,7 +114,7 @@ if (( $# >= 1 )); then
           *) param="$1"; shift; break ;;              # first non-option is target
         esac
       done
-      # If anything else remains after target, it likely means an unquoted path with spaces.
+      # If anything else remains after target, it's likely an unquoted path with spaces.
       if (( $# )); then
         echo "ERROR: multiple non-option arguments detected. If your path has spaces, wrap it in quotes." >&2
         exit 2
@@ -124,7 +123,7 @@ if (( $# >= 1 )); then
   esac
 fi
 
-# Resolve PARAM to a path, detect mode
+# Resolve target & mode
 TARGET_PATH="$(resolve_path "${param:-}")"
 MODE="dir"
 TARGET_DIR="$TARGET_PATH"
@@ -135,7 +134,7 @@ if [[ -e "$TARGET_PATH" && ! -d "$TARGET_PATH" ]]; then
   INPUT_PATH="$TARGET_PATH"
 fi
 
-# Unified filenames
+# Unified filenames per target dir
 LOG_FILE="$TARGET_DIR/asr.log"
 PID_FILE="$TARGET_DIR/asr.pid"
 
@@ -179,39 +178,65 @@ echo "Using temp dir: $TMPDIR (ASR_TMPDIR=$ASR_TMPDIR)"
 echo "asr.js: $ASR_JS_PATH"
 if ((${#opts[@]})); then printf 'Passing options to asr.js: %q\n' "${opts[@]}"; fi
 
-trap 'rm -f "$PID_FILE" >/dev/null 2>&1 || true' EXIT
+# Export for the subshell (needed by tee and pid handling)
+export ASR_MODE ASR_INPUT ASR_NODE_BIN ASR_JS_ENTRY ASR_PID_FILE ORIGINAL_PWD
+ASR_MODE="$MODE"
+ASR_INPUT="$INPUT_PATH"
+ASR_NODE_BIN="$NODE_BIN"
+ASR_JS_ENTRY="$ASR_JS_PATH"
+ASR_PID_FILE="$PID_FILE"
+ORIGINAL_PWD="$TARGET_DIR"
+export LOG_FILE PID_FILE TARGET_DIR
 
-# Export minimal vars for subshell; pass options via quoted array expansion
-export ASR_MODE="$MODE"
-export ASR_INPUT="$INPUT_PATH"
-export ASR_NODE_BIN="$NODE_BIN"
-export ASR_JS_ENTRY="$ASR_JS_PATH"
-export ASR_PID_FILE="$PID_FILE"
-export ORIGINAL_PWD="$TARGET_DIR"
+# Option passing:
+if ((${#opts[@]})); then
+  ASR_OPTS_SERIALIZED="$(printf '%q ' "${opts[@]}")"; export ASR_OPTS_SERIALIZED
+  export ASR_HAS_OPTS="1"
+else
+  unset ASR_OPTS_SERIALIZED || true
+  unset ASR_HAS_OPTS || true
+fi
 
-# shell-safe: serialize opts into one var to re-expand inside subshell
-# (uses printf %q to preserve spaces/equals; read -r -a recovers array)
-ASR_OPTS_SERIALIZED="$(printf '%q ' "${opts[@]:-}")"; export ASR_OPTS_SERIALIZED
+# ====== RUN: tee lives INSIDE the detached session; child handles cleanup ======
+setsid bash -c '
+  set -euo pipefail
+  # Ignore hangups / Ctrl-C in this detached session
+  trap "" HUP INT
+  # Always log exit code and clear the pid on any exit path
+  trap "st=\$?; echo \"[asr] EXIT \$st\" | tee -a \"\$LOG_FILE\"; rm -f \"\$ASR_PID_FILE\"; exit \$st" EXIT
 
-{ set -o pipefail; setsid bash -c '
-    set -euo pipefail
-    echo $$ > "$ASR_PID_FILE"
-    export TMPDIR="/tmp" TMP="/tmp" TEMP="/tmp"
-    export ASR_TMPDIR ASR_SECRETS_DIR ORIGINAL_PWD
-    cd "'"$RUNTIME_DIR"'"
-    # recover options array
+  # fully detach from any terminal input
+  exec </dev/null
+
+  echo $$ > "$ASR_PID_FILE"
+  export TMPDIR="/tmp" TMP="/tmp" TEMP="/tmp"
+  export ASR_TMPDIR ASR_SECRETS_DIR ORIGINAL_PWD LOG_FILE ASR_PID_FILE
+
+  cd "'"$RUNTIME_DIR"'"
+
+  if [[ "${ASR_HAS_OPTS:-}" = "1" ]]; then
     read -r -a _OPTS <<< "${ASR_OPTS_SERIALIZED:-}"
-    echo "[asr] (start) $ASR_MODE: $ASR_INPUT"
-    exec "$ASR_NODE_BIN" "$ASR_JS_ENTRY" "${_OPTS[@]}" --input "$ASR_INPUT"
-  ' asr-batch 2>&1 | tee -a "$LOG_FILE"; } &
+    # Log argv
+    { printf "[asr] exec: "; printf "%q " "$ASR_NODE_BIN" "$ASR_JS_ENTRY" "${_OPTS[@]}" "$ASR_INPUT"; printf "\n"; } | tee -a "$LOG_FILE"
+    echo "[asr] (start) $ASR_MODE: $ASR_INPUT" | tee -a "$LOG_FILE"
+    ( "$ASR_NODE_BIN" "$ASR_JS_ENTRY" "${_OPTS[@]}" "$ASR_INPUT" ) 2>&1 | tee -a "$LOG_FILE"
+  else
+    { printf "[asr] exec: "; printf "%q " "$ASR_NODE_BIN" "$ASR_JS_ENTRY" "$ASR_INPUT"; printf "\n"; } | tee -a "$LOG_FILE"
+    echo "[asr] (start) $ASR_MODE: $ASR_INPUT" | tee -a "$LOG_FILE"
+    ( "$ASR_NODE_BIN" "$ASR_JS_ENTRY" "$ASR_INPUT" ) 2>&1 | tee -a "$LOG_FILE"
+  fi
+' >/dev/null 2>&1 &
 
 runner_pid=$!
 echo "$runner_pid" > "$PID_FILE"
 echo "Runner PID: $(cat "$PID_FILE") (PID file: $PID_FILE)"
-echo "Tip: asr tail [PARAM]  |  asr kill [PARAM]  |  asr last [PARAM]  |  asr log [PARAM]"
+echo "asr is RUNNING in: $TARGET_DIR"
+if [[ -n "${param:-}" ]]; then
+  echo "Watch logs: asr tail \"$param\"    |    Stop: asr kill \"$param\""
+else
+  echo "Watch logs: asr tail               |    Stop: asr kill"
+fi
+echo "Log file: $LOG_FILE"
 
-wait "$runner_pid"
-status=$?
-echo "[asr] EXIT $status" | tee -a "$LOG_FILE"
-rm -f "$PID_FILE"
-exit "$status"
+# parent exits immediately; child session owns lifecycle & cleanup
+exit 0
