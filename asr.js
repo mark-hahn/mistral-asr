@@ -37,22 +37,20 @@ const switches = new Set(rawArgs.filter(a => a.startsWith("--") && !a.includes("
 const positional = rawArgs.filter(a => !a.startsWith("--"));
 
 function getNum(name, dflt) {
-  if (flagsKVP.has(name)) {
-    const n = Number(flagsKVP.get(name));
-    if (Number.isFinite(n) && n >= 0) return n;
-  }
+  if (flagsKVP.has(name)) return Number(flagsKVP.get(name));
   return dflt;
 }
 // 120s -> 5 Mb flac
-const chunkSec =              getNum("--chunk-sec",  120);
-const trimSec =               getNum("--trim-sec",    3);
-const overlapSec =            getNum("--overlap-sec", 3);
+const chunkSec =              getNum("--chunk-sec",    120);
+const trimSec =               getNum("--trim-sec",       3);
+const overlapSec =            getNum("--overlap-sec",    3);
+const timeMatchMgn =          getNum("--time-match-mgn", 0.5);
+const testMins =              getNum("--test-mins",      0);
 const offsetSec =             chunkSec - trimSec - overlapSec - trimSec;
 const minChunkSec =           trimSec + overlapSec + trimSec;
 const audioQuality =          flagsKVP.get("--audio-quality") || "max";
 const enablePreprocessing =  !switches.has("--no-preprocess");
 const enableNoiseReduction = !switches.has("--no-denoise");
-const testMins =              getNum("--test-mins", 2);
 const apiTemperature =        getNum("--temperature", 0);
 const apiResponseFormat =     flagsKVP.get("--response-format") || "verbose_json";
 const apiPrompt =             flagsKVP.get("--prompt") || null;
@@ -446,6 +444,7 @@ function writeSRT(segments, outputPath) {
   let lastEnd   = -1e9;
   let lastText  = null;
   let skipSeg;
+  let hadDuplicate = false;
   const segOut = [];
   for (const segment of sortedSegments) {
     const start = segment.start;
@@ -453,12 +452,12 @@ function writeSRT(segments, outputPath) {
     const text  = segment.text.trim();
     try {
       skipSeg  = true;
-
       if (text.length == 0) continue;
-      if(text == lastText)  continue;
-      
-      if((start > lastStart && start < lastEnd) ||
-         (end   > lastStart && end   < lastEnd)) {
+      const lastCenter = (lastStart + lastEnd) / 2;
+      const center     = (start + end) / 2;
+      if(Math.abs(center - lastCenter) < timeMatchMgn) {
+        if(text == lastText)  continue;
+        hadDuplicate = true;
         if(text === lastText) continue;
         console.log(`\n[${ts()}] Overlapping segments ...`);
         console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`); 
@@ -474,9 +473,13 @@ function writeSRT(segments, outputPath) {
     }
     finally {
       if(!skipSeg) segOut.push({ start, end, text });
-      lastStart = start;
-      lastEnd   = end;
-      lastText  = text;
+      if(!hadDuplicate) {
+        lastStart = start;
+        lastEnd   = end;
+        lastText  = text;
+      }
+      else lastStart = lastEnd = -1;
+      hadDuplicate = false;
     }
   }
   let srtContent = "";
@@ -584,18 +587,19 @@ async function processOneVideo(videoPath) {
 async function main() {
   console.log(`\nConfiguration:`);
   console.log(`   Test Mode:        ${testMins > 0 ? `${testMins} minutes` : 'OFF'}`);
-  console.log(`   Chunk Duration:   ${chunkSec}s`);
-  console.log(`   Trim Duration:    ${trimSec}s`);
-  console.log(`   Overlap Duration: ${overlapSec}s`);
-  console.log(`   Audio Quality:    ${audioQuality} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
-  console.log(`   Preprocessing:    ${enablePreprocessing}`);
-  console.log(`   Noise Reduction:  ${enableNoiseReduction}`);
-  console.log(`   API Model:        ${model}`);
-  console.log(`   API Language:     ${forceLanguage}`);
-  console.log(`   API Temperature:  ${apiTemperature}`);
-  console.log(`   API Response:     ${apiResponseFormat}`);
-  console.log(`   API Prompt:       ${apiPrompt || 'None'}`);
-  console.log(`   File Size Limit:  ${(fileLimit / 1024 / 1024).toFixed(1)}MB`);
+  console.log(`   Chunk Duration:    ${chunkSec}s`);
+  console.log(`   Trim Duration:     ${trimSec}s`);
+  console.log(`   Overlap Duration:  ${overlapSec}s`);
+  console.log(`   Time Match Margin: ${timeMatchMgn}s`);
+  console.log(`   Audio Quality:     ${audioQuality} (${audioConfig.rate}Hz, ${audioConfig.bitrate})`);
+  console.log(`   Preprocessing:     ${enablePreprocessing}`);
+  console.log(`   Noise Reduction:   ${enableNoiseReduction}`);
+  console.log(`   API Model:         ${model}`);
+  console.log(`   API Language:      ${forceLanguage}`);
+  console.log(`   API Temperature:   ${apiTemperature}`);
+  console.log(`   API Response:      ${apiResponseFormat}`);
+  console.log(`   API Prompt:        ${apiPrompt || 'None'}`);
+  console.log(`   File Size Limit:   ${(fileLimit / 1024 / 1024).toFixed(1)}MB`);
   console.log();
 
   try {

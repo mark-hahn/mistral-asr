@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "Launch ASR",
       "program": "${workspaceFolder}/asr.js",
-      "args": ["--chunk-sec=120", "--trim-sec=3", "--overlap-sec=3", "test"],
+      "args": ["--test-mins=15","test"],
       "skipFiles": ["<node_internals>/**"],
       "console": "integratedTerminal",
       "outputCapture": "std"
