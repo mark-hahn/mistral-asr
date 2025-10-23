@@ -25,6 +25,38 @@ import FormData from "form-data";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 const tmpDir     = path.join(__dirname, 'tmp');
+// Default install location used by the installer
+const INSTALL_LOG_PATH = '/usr/local/lib/asr/mistral.log';
+// Prefer install path when present, otherwise use runtime directory
+let MISTRAL_LOG = fs.existsSync(path.dirname(INSTALL_LOG_PATH)) ? INSTALL_LOG_PATH : path.join(__dirname, 'mistral.log');
+
+// Ensure the directory and file exist and are writable (best-effort)
+try {
+  const logDir = path.dirname(MISTRAL_LOG);
+  fs.mkdirSync(logDir, { recursive: true });
+  if (!fs.existsSync(MISTRAL_LOG)) {
+    fs.writeFileSync(MISTRAL_LOG, `# mistral.log created ${new Date().toISOString()}\n`, { mode: 0o600 });
+  }
+} catch (e) {
+  // Non-fatal: continue without crashing; appendMistralLog will also guard
+  console.error(`Could not ensure mistral log file ${MISTRAL_LOG}: ${e.message}`);
+}
+
+// function appendMistralLog(obj) {
+//   try {
+//     const line = typeof obj === 'string' ? obj : JSON.stringify(obj);
+//     fs.appendFileSync(MISTRAL_LOG, (new Date()).toISOString() + ' ' + line + '\n', 'utf8');
+//   } catch (e) {
+//     // Don't let logging break the main flow
+//     // If we failed, try falling back to runtime dir once
+//     try {
+//       const fallback = path.join(__dirname, 'mistral.log');
+//       if (fallback !== MISTRAL_LOG) {
+//         fs.appendFileSync(fallback, (new Date()).toISOString() + ' ' + line + '\n', 'utf8');
+//       }
+//     } catch (_) {}
+//   }
+// }
 
 /* ---------------- CLI argument parsing ---------------- */
 const rawArgs = process.argv.slice(2);
@@ -376,12 +408,16 @@ async function callApi(uploadInfo) {
             timeout: API_TIMEOUT
         }
       );
+      // Log successful response (trim audio bytes)
+      // appendMistralLog({file: uploadInfo.filename, size: uploadInfo.size, attempt, status: response.status, body: response.data});
     } catch (err) {
       // err may be an AxiosError with response data
       const status = err?.response?.status || err.message || 'unknown';
       const body = err?.response?.data || err?.toString();
       console.error(`[${ts()}] API request failed (attempt ${attempt}): ${status}`);
       if (body) console.error(JSON.stringify(body));
+      // Append failure to mistral log for offline comparison
+      // appendMistralLog({file: uploadInfo.filename, size: uploadInfo.size, attempt, status, body});
       if (attempt > MAX_RETRIES) {
         console.error(`[${ts()}] FATAL: max retries reached`);
         process.exit(1);
@@ -453,6 +489,20 @@ function writeSRT(segments, outputPath) {
   }
   const sortedSegments = segments.sort((a, b) => a.start - b.start);
 
+  // Helper: normalize text for comparisons (lowercase, remove punctuation,
+  // collapse whitespace). We keep original text for output but use normalized
+  // form to detect duplicates/repeats.
+  function normalizeText(s) {
+    if (!s) return "";
+    // remove most punctuation but keep apostrophes; collapse whitespace
+    const cleaned = s.toLowerCase().replace(/[^\w\s'’]/g, ' ')
+                         .replace(/_+/g, ' ')
+                         .replace(/\s+/g, ' ').trim();
+    return cleaned;
+  }
+
+  // First pass: basic overlap de-dup as before, but preserve original text
+  // and attach normalized text for later merging heuristics.
   let lastStart = +1e9;
   let lastEnd   = -1e9;
   let lastText  = null;
@@ -468,13 +518,13 @@ function writeSRT(segments, outputPath) {
       if (text.length == 0) continue;
       const leftMatch  = Math.abs(start - lastStart) < timeMatchMgn;
       const rightMatch = Math.abs(end   - lastEnd  ) < timeMatchMgn;
-      if(leftMatch || rightMatch) {
+      if (leftMatch || rightMatch) {
         hadDuplicate = true;
-        if(text === lastText) continue;
+        if (text === lastText) continue;
         console.log(`\n[${ts()}] Overlapping segments ...`);
-        console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`); 
+        console.log(`A ${vs(lastStart)}, ${vs(lastEnd)}, "${lastText}"`);
         console.log(`B ${vs(start)}, ${vs(end)}, "${text}"`);
-        if(text.length > lastText.length) {
+        if (text.length > lastText.length) {
           console.log('Using A');
           continue;
         }
@@ -482,21 +532,92 @@ function writeSRT(segments, outputPath) {
         segOut.pop();
       }
       skipSeg  = false;
-    }
-    finally {
-      if(!skipSeg) segOut.push({ start, end, text });
-      if(!hadDuplicate) {
+    } finally {
+      if (!skipSeg) segOut.push({ start, end, text, norm: normalizeText(text) });
+      if (!hadDuplicate) {
         lastStart = start;
         lastEnd   = end;
         lastText  = text;
-      }
-      else lastStart = lastEnd = -1;
+      } else lastStart = lastEnd = -1;
       hadDuplicate = false;
     }
   }
+
+  // Second pass: merge adjacent/overlapping segments based on normalized text
+  // and collapse runs of short repeated single-token captions.
+  const mergedSegs = [];
+  const GAP_TOL = 2.0; // seconds - normal gap tolerance
+  const SHORT_SEG_MAX_DUR = 2.0; // seconds - consider a segment "short"
+  const SHORT_SEG_GAP = 5.0; // seconds - allow joining short repeated segments across this gap
+  const SINGLE_TOKEN_WINDOW = 30.0; // seconds - window to collapse repeated single-token captions
+
+  for (const seg of segOut) {
+    if (mergedSegs.length === 0) {
+      mergedSegs.push({ ...seg });
+      continue;
+    }
+    const last = mergedSegs[mergedSegs.length - 1];
+    const gap = seg.start - last.end;
+    const segDur = seg.end - seg.start;
+    const lastDur = last.end - last.start;
+    const lastNorm = last.norm || normalizeText(last.text);
+    const segNorm = seg.norm || normalizeText(seg.text);
+
+    let shouldMerge = false;
+    if (segNorm === lastNorm && segNorm.length > 0) {
+      // Overlap or small gap
+      if (seg.start <= last.end + GAP_TOL) shouldMerge = true;
+      // Short repeated segments across a slightly larger gap
+      else if (segDur <= SHORT_SEG_MAX_DUR && lastDur <= SHORT_SEG_MAX_DUR && gap <= SHORT_SEG_GAP) shouldMerge = true;
+      // Single-token repeated captions across a larger window
+      else {
+        const lastTokens = lastNorm.split(' ').filter(Boolean).length;
+        const segTokens = segNorm.split(' ').filter(Boolean).length;
+        if (lastTokens === 1 && segTokens === 1 && gap <= SINGLE_TOKEN_WINDOW) shouldMerge = true;
+      }
+    }
+
+    if (shouldMerge) {
+      // Merge into last: extend time bounds and prefer the longer original text
+      last.end = Math.max(last.end, seg.end);
+      last.start = Math.min(last.start, seg.start);
+      // Keep original text from the first occurrence (usually fine) but
+      // if incoming has more characters, prefer that (richer text)
+      if (seg.text.length > last.text.length) last.text = seg.text;
+      // Refresh normalized form
+      last.norm = segNorm;
+    } else {
+      mergedSegs.push({ ...seg });
+    }
+  }
+
+  // Final pass: remove pathological runs where a single short token repeats
+  // many times (e.g., repeated "Kanye" one-second captions). Collapse runs
+  // that are the same normalized single token into a single caption covering
+  // their span.
+  const finalSegs = [];
+  for (const seg of mergedSegs) {
+    if (finalSegs.length === 0) { finalSegs.push({ ...seg }); continue; }
+    const last = finalSegs[finalSegs.length - 1];
+    const lastNorm = last.norm || normalizeText(last.text);
+    const segNorm = seg.norm || normalizeText(seg.text);
+    const lastTokens = lastNorm.split(' ').filter(Boolean).length;
+    const segTokens = segNorm.split(' ').filter(Boolean).length;
+    const gap = seg.start - last.end;
+    // If both are single-token identical normalized and within a moderate window, collapse
+    if (lastNorm === segNorm && lastTokens === 1 && segTokens === 1 && gap <= SINGLE_TOKEN_WINDOW) {
+      last.end = Math.max(last.end, seg.end);
+      // prefer longer/original text for display
+      if (seg.text.length > last.text.length) last.text = seg.text;
+      continue;
+    }
+    finalSegs.push({ ...seg });
+  }
+
+  // Write SRT from finalSegs using original (prefer first occurrence) text
   let srtContent = "";
   let index = 0;
-  for (const seg of segOut) {
+  for (const seg of finalSegs) {
     const startTime = toSrtTime(seg.start);
     const endTime   = toSrtTime(seg.end);
     srtContent += `${++index}\n`;
