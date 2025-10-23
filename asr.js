@@ -356,14 +356,19 @@ async function callApi(uploadInfo) {
       filename:    uploadInfo.filename,
       contentType: uploadInfo.mime
     });
-    form.append("model", model);
-    form.append("language", forceLanguage);
-    form.append("timestamp_granularities", "segment");
+  form.append("model", model);
+  // Timestamps are incompatible with language prediction on the API.
+  // If we're requesting timestamps, omit the `language` field (treat as None)
+  // and explicitly set return_language=false to disable language prediction.
+  form.append("return_language", "false");
+  // The API expects a plain 'segment' value for timestamp_granularities
+  // when submitted via multipart/form-data. Append the plain string.
+  form.append("timestamp_granularities", "segment");
     form.append("response_format", apiResponseFormat);
     form.append("temperature", String(apiTemperature));
     if (apiPrompt) form.append("prompt", apiPrompt);
       attempt ++;   
-    let response = {}; 
+    let response = null;
     try {
       response = await axios.post(
         "https://api.mistral.ai/v1/audio/transcriptions", form, {
@@ -371,20 +376,28 @@ async function callApi(uploadInfo) {
             timeout: API_TIMEOUT
         }
       );
+    } catch (err) {
+      // err may be an AxiosError with response data
+      const status = err?.response?.status || err.message || 'unknown';
+      const body = err?.response?.data || err?.toString();
+      console.error(`[${ts()}] API request failed (attempt ${attempt}): ${status}`);
+      if (body) console.error(JSON.stringify(body));
+      if (attempt > MAX_RETRIES) {
+        console.error(`[${ts()}] FATAL: max retries reached`);
+        process.exit(1);
+      }
+      console.error(`[${ts()}] Retrying...`);
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await sleep(delay);
+      continue;
     }
-    catch(err) { 
-      response.status = err.message; 
-    }
-    if (response.status === 200) {
+    if (response && response.status === 200) {
       response.data.delay = Date.now() - apiStart;
       return response.data;
     }
-    if(attempt > MAX_RETRIES) {
-      console.error(`[${ts()}] API error: ${response.status
-                                           }\n FATAL: max retries reached`);
-      process.exit(1);
-    }
-    console.error(`[${ts()}] API error: ${response.status}, retrying`);
+    // Non-200 but no exception (unlikely) — log and retry
+    const status = response?.status || 'unknown';
+    console.error(`[${ts()}] API error: ${status}, retrying`);
     if (attempt == 1) console.log('chunk, size:', uploadInfo.size, 
                                        '- file:', uploadInfo.filename);
     const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
